@@ -66,10 +66,27 @@ jobs:
 
           echo "=== link ==="
           clang -target arm64-apple-ios14.0 -isysroot "$SDK" \
+                -fuse-ld=lld \
                 -framework UIKit -framework Foundation \
                 build/main.o build/rvc.o build/fr.o \
                 -o build/AMapForge.app/AMapForge 2>&1 | tee /tmp/link.log
-          echo "rclink=$?"
+          rclink=$?
+          echo "rclink=$rclink"
+          if [ $rclink -ne 0 ] || [ ! -f build/AMapForge.app/AMapForge ]; then
+            echo "=== retry with ld64.lld directly ==="
+            LD64=$(command -v ld64.lld || command -v ld.lld || echo "")
+            echo "ld64.lld: $LD64"
+            if [ -n "$LD64" ]; then
+              $LD64 -arch arm64 \
+                -platform_version ios 14.0 14.0 \
+                -syslibroot "$SDK" \
+                -framework UIKit -framework Foundation \
+                -o build/AMapForge.app/AMapForge \
+                build/main.o build/rvc.o build/fr.o 2>&1 | tee -a /tmp/link.log
+              echo "ld64 rc=$?"
+            fi
+          fi
+          ls -la build/AMapForge.app/ || true
 
           ls -la build/AMapForge.app/ || echo "no app dir"
 
