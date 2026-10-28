@@ -7,18 +7,27 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
-          brew install ldid xz || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential clang lld make git curl \
+            libplist-utils libssl-dev libxml2-dev \
+            libc6-dev libstdc++-12-dev zlib1g-dev \
+            unzip xz-utils ldid 2>/dev/null || true
+          echo "--- versions ---"
+          clang --version | head -2
+          make --version | head -1
+          (ldid -h 2>&1 | head -1) || echo "ldid not installed"
 
       - name: Clone Theos
         run: |
-          export THEOS=$RUNNER_TEMP/theos
+          export THEOS=$GITHUB_WORKSPACE/theos
           git clone --recursive --depth 1 https://github.com/theos/theos.git $THEOS
           echo "THEOS=$THEOS" >> $GITHUB_ENV
           echo "$THEOS/bin" >> $GITHUB_PATH
@@ -26,24 +35,35 @@ jobs:
       - name: Download iOS SDKs
         run: |
           cd $THEOS/sdks
-          curl -sL -o sdk.tar.xz "https://github.com/theos/sdks/archive/master.tar.gz"
+          curl -sL -o sdk.tar.gz "https://github.com/theos/sdks/archive/master.tar.gz"
           tar xzf sdk.tar.gz --strip-components=1
           rm -f sdk.tar.gz
-          ls -d iPhoneOS*.sdk | head -5
+          echo "--- SDKs ---"
+          ls -d iPhoneOS*.sdk 2>/dev/null | head -8
+
+      - name: Show Theos env
+        run: |
+          echo "THEOS=$THEOS"
+          ls $THEOS/bin | head -10
+          ls $THEOS/toolchain 2>/dev/null || echo "(no bundled toolchain)"
 
       - name: Build package
         run: |
           cd theos-app
           make clean || true
-          make package FINALPACKAGE=1 DEBUG=0
+          make package FINALPACKAGE=1 DEBUG=0 2>&1 | tail -60
 
-      - name: List output
+      - name: Collect debs
+        if: always()
         run: |
-          find . -name "*.deb" -o -name "*.dylib" | head -20
+          mkdir -p /tmp/out
+          find . -name "*.deb" -exec cp {} /tmp/out/ \; 2>/dev/null || true
+          ls -la /tmp/out/ || echo "no deb produced"
 
       - name: Upload deb
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: amapforge-deb
-          path: "**/*.deb"
+          path: /tmp/out/*.deb
           if-no-files-found: warn
