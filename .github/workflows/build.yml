@@ -1,0 +1,62 @@
+name: Build AMap Forge
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: theos/theos@master
+        with:
+          theos: ${{ github.workspace }}/theos
+
+      - name: Setup THEOS env
+        run: |
+          echo "THEOS=${{ github.workspace }}/theos" >> $GITHUB_ENV
+          echo "${{ github.workspace }}/theos/bin" >> $GITHUB_PATH
+          mkdir -p ${{ github.workspace }}/theos/sdks
+
+      - name: Download iOS SDK
+        run: |
+          cd ${{ github.workspace }}/theos/sdks
+          curl -L -o sdk.zip "https://github.com/theos/sdks/archive/master.zip"
+          unzip -q sdk.zip
+          mv sdks-master/* .
+          rm -rf sdk.zip sdks-master
+          ls -d iPhoneOS*.sdk | head
+
+      - name: Pick SDK
+        run: |
+          cd ${{ github.workspace }}/theos/sdks
+          SDK=$(ls -d iPhoneOS*.sdk | sort -V | tail -1)
+          echo "Using $SDK"
+          echo "TARGET_SDK=$SDK" >> $GITHUB_ENV
+
+      - name: Build package
+        run: |
+          cd ${{ github.workspace }}/theos-app
+          make clean || true
+          make package FINALPACKAGE=1 \
+            TARGET=iphone:clang:latest:14.0 \
+            SDKVERSION=${{ env.TARGET_SDK }} \
+            DEBUG=0
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p ${{ github.workspace }}/out
+          find ${{ github.workspace }} -name "*.deb" -exec cp {} ${{ github.workspace }}/out/ \;
+          ls -la ${{ github.workspace }}/out/
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: amapforge-deb
+          path: ${{ github.workspace }}/out/*.deb
+          if-no-files-found: error
