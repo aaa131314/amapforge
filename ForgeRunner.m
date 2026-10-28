@@ -1,28 +1,55 @@
 #import "ForgeRunner.h"
+#import <spawn.h>
+#import <sys/wait.h>
+#import <unistd.h>
+
+extern char **environ;
 
 static NSString *const kForgeBin = @"/var/jb/usr/bin/amap-forge";
 static NSString *const kForgeLog = @"/var/jb/var/log/amap-forge.log";
 
 @implementation ForgeRunner
 
+/// 用 posix_spawn 执行 shell 命令（iOS 上没有 NSTask）
 + (NSString *)runShell:(NSString *)cmd {
-    NSMutableString *out = [NSMutableString string];
-    @try {
-        NSTask *t = [[NSTask alloc] init];
-        t.launchPath = @"/var/jb/usr/bin/bash";
-        t.arguments = @[@"-lc", cmd];
-        NSPipe *pipe = [NSPipe pipe];
-        t.standardOutput = pipe;
-        t.standardError = pipe;
-        [t launch];
-        NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
-        [t waitUntilExit];
-        NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (s) [out appendString:s];
-    } @catch (NSException *e) {
-        [out appendFormat:@"异常: %@", e.reason];
+    NSMutableData *out = [NSMutableData data];
+    int fds[2];
+    if (pipe(fds) != 0) return @"pipe failed";
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, fds[0]);
+    posix_spawn_file_actions_addclose(&actions, fds[1]);
+
+    const char *bash = "/var/jb/usr/bin/bash";
+    const char *cflag = "-lc";
+    const char *cstr = [cmd UTF8String];
+    char *argv[] = {(char *)bash, (char *)cflag, (char *)cstr, NULL};
+
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, bash, &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(fds[1]);
+
+    if (rc != 0) {
+        close(fds[0]);
+        return [NSString stringWithFormat:@"posix_spawn err=%d (%s)", rc, strerror(rc)];
     }
-    return out;
+
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(fds[0], buf, sizeof(buf))) > 0) {
+        [out appendBytes:buf length:(NSUInteger)n];
+    }
+    close(fds[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    NSString *s = [[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding];
+    return s ?: @"";
 }
 
 + (NSString *)startWithID:(NSString *)utdid {
@@ -71,8 +98,9 @@ static NSString *const kForgeLog = @"/var/jb/var/log/amap-forge.log";
                                              encoding:NSUTF8StringEncoding
                                                 error:nil];
     if (!log) return 0;
-    NSInteger n = 0, pos = 0;
-    while (pos < (NSInteger)log.length) {
+    NSInteger n = 0;
+    NSUInteger pos = 0;
+    while (pos < log.length) {
         NSRange r = [log rangeOfString:@"'kind': 'served'" options:0
                                  range:NSMakeRange(pos, log.length - pos)];
         if (r.location == NSNotFound) break;
