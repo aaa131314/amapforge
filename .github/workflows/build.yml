@@ -50,7 +50,7 @@ jobs:
           echo "=== using SDK: $SDK ==="
           mkdir -p build/AMapForge.app
 
-          CFLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=14.0 -fobjc-arc -O2 -I."
+          CFLAGS="-target arm64-apple-ios14.0 -isysroot $SDK -fobjc-arc -O2 -I."
 
           echo "=== compile main.m ==="
           clang $CFLAGS -c main.m -o build/main.o 2>&1 | tee /tmp/c1.log
@@ -65,7 +65,7 @@ jobs:
           echo "rc3=$?"
 
           echo "=== link ==="
-          clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=14.0 \
+          clang -target arm64-apple-ios14.0 -isysroot "$SDK" \
                 -framework UIKit -framework Foundation \
                 build/main.o build/rvc.o build/fr.o \
                 -o build/AMapForge.app/AMapForge 2>&1 | tee /tmp/link.log
@@ -91,6 +91,7 @@ jobs:
           if [ ! -f "$APP/AMapForge" ]; then
             echo "binary missing, cannot package"
             echo "### package: binary missing" >> $GITHUB_STEP_SUMMARY
+            ls -la build/ || true
             exit 0
           fi
 
