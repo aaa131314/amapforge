@@ -1,0 +1,10 @@
+Package: com.local.amapforge
+Name: AMap Forge
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 一键切换高德 App 设备身份（UTDID），绕过设备封禁。桌面 App，按钮操作。
+Maintainer: local
+Author: local
+Section: Utilities
+Depends: firmware (>= 14.0)
+Priority: optional
