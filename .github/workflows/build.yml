@@ -68,7 +68,12 @@ jobs:
           echo "PATH=$PATH"
           ls $THEOS/bin | head
           which ldid || echo "NO LDID"
-          ls $THEOS/sdks | head -3
+          echo "--- all SDKs ---"
+          ls $THEOS/sdks
+          echo "--- theos makefiles ---"
+          ls $THEOS/makefiles | head -10
+          echo "--- default SDK detection ---"
+          ls -d $THEOS/sdks/iPhoneOS*.sdk 2>/dev/null | sort -V | tail -1
 
       - name: Build package
         run: |
