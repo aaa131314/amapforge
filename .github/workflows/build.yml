@@ -81,12 +81,14 @@ jobs:
           exit 0
 
       - name: Collect debs
+        if: always()
         run: |
           mkdir -p /tmp/out
           find . -name "*.deb" -exec cp {} /tmp/out/ \; 2>/dev/null || true
           ls -la /tmp/out/ || echo "no deb"
 
       - name: Upload deb
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: amapforge-deb
@@ -94,6 +96,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
