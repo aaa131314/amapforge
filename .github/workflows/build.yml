@@ -35,7 +35,15 @@ jobs:
       - name: Download iOS SDKs
         run: |
           cd $THEOS/sdks
-          curl -sL -o sdk.tar.gz "https://github.com/theos/sdks/archive/master.tar.gz"
+          set -x
+          # codeload 直链，避免 archive/ 跳转到 Azure 导致的认证错误
+          curl -fL --retry 3 --retry-delay 2 \
+            -o sdk.tar.gz \
+            "https://codeload.github.com/theos/sdks/tar.gz/refs/heads/master" \
+          || curl -fL --retry 3 \
+            -o sdk.tar.gz \
+            "https://github.com/theos/sdks/archive/refs/heads/master.tar.gz"
+          ls -la sdk.tar.gz
           tar xzf sdk.tar.gz --strip-components=1
           rm -f sdk.tar.gz
           echo "--- SDKs ---"
