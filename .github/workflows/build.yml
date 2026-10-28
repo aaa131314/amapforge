@@ -77,7 +77,6 @@ jobs:
 
       - name: Build package
         run: |
-          cd theos-app
           make clean > /tmp/build.log 2>&1 || true
           echo "=========== BUILD START ===========" >> /tmp/build.log
           set +e
