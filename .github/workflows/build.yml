@@ -123,7 +123,7 @@ jobs:
           {
             echo "Package: com.local.amapforge"
             echo "Name: AMap Forge"
-            echo "Version: 1.0.1"
+            echo "Version: 1.0.2"
             echo "Architecture: iphoneos-arm64"
             echo "Description: AMap device identity switcher."
             echo "Maintainer: local"
@@ -135,7 +135,7 @@ jobs:
           dpkg-deb -Zgzip -z9 --build --root-owner-group "$ROOT" /tmp/out.deb 2>&1 | tail -5
           ls -la /tmp/out.deb
           mkdir -p dist
-          cp /tmp/out.deb "dist/com.local.amapforge_1.0.1_iphoneos-arm64.deb"
+          cp /tmp/out.deb "dist/com.local.amapforge_1.0.2_iphoneos-arm64.deb"
           ls -la dist/
           echo "### package done" >> $GITHUB_STEP_SUMMARY
           exit 0
