@@ -1,68 +1,108 @@
 #import "ForgeRunner.h"
-#import <spawn.h>
-#import <sys/wait.h>
-#import <unistd.h>
 
-extern char **environ;
-
-static NSString *const kForgeBin = @"/var/jb/usr/bin/amap-forge";
-static NSString *const kForgeLog = @"/var/jb/var/log/amap-forge.log";
+// 电脑端 forge 服务（同一 WiFi 下）
+static NSString *const kServer = @"http://192.168.5.25:8050";
 
 @implementation ForgeRunner
 
-/// 用 posix_spawn 执行 shell 命令（iOS 上没有 NSTask）
-+ (NSString *)runShell:(NSString *)cmd {
-    NSMutableData *out = [NSMutableData data];
-    int fds[2];
-    if (pipe(fds) != 0) return @"pipe failed";
+/// 同步 HTTP POST JSON
++ (NSDictionary *)postJSON:(NSString *)path body:(NSDictionary *)body {
+    NSString *urlStr = [kServer stringByAppendingString:path];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) return @{@"ok": @NO, @"error": @"bad url"};
 
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO);
-    posix_spawn_file_actions_addclose(&actions, fds[0]);
-    posix_spawn_file_actions_addclose(&actions, fds[1]);
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    req.timeoutInterval = 45;
 
-    const char *bash = "/var/jb/usr/bin/bash";
-    const char *cflag = "-lc";
-    const char *cstr = [cmd UTF8String];
-    char *argv[] = {(char *)bash, (char *)cflag, (char *)cstr, NULL};
+    NSError *err = nil;
+    NSData *payload = [NSJSONSerialization dataWithJSONObject:body ?: @{}
+                                                     options:0
+                                                       error:&err];
+    if (err) return @{@"ok": @NO, @"error": err.localizedDescription};
+    req.HTTPBody = payload;
 
-    pid_t pid = 0;
-    int rc = posix_spawn(&pid, bash, &actions, NULL, argv, environ);
-    posix_spawn_file_actions_destroy(&actions);
-    close(fds[1]);
+    __block NSData *respData = nil;
+    __block NSError *respErr = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
-    if (rc != 0) {
-        close(fds[0]);
-        return [NSString stringWithFormat:@"posix_spawn err=%d (%s)", rc, strerror(rc)];
+    NSURLSessionDataTask *task =
+        [[NSURLSession sharedSession] dataTaskWithRequest:req
+                                       completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            respData = d;
+            respErr = e;
+            dispatch_semaphore_signal(sem);
+        }];
+    [task resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(50 * NSEC_PER_SEC)));
+
+    if (respErr) return @{@"ok": @NO, @"error": respErr.localizedDescription};
+    if (!respData) return @{@"ok": @NO, @"error": @"no response"};
+
+    NSError *jerr = nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:respData options:0 error:&jerr];
+    if (jerr || ![obj isKindOfClass:[NSDictionary class]]) {
+        NSString *s = [[NSString alloc] initWithData:respData encoding:NSUTF8StringEncoding];
+        return @{@"ok": @NO, @"error": s ?: @"bad json"};
     }
+    return (NSDictionary *)obj;
+}
 
-    char buf[4096];
-    ssize_t n;
-    while ((n = read(fds[0], buf, sizeof(buf))) > 0) {
-        [out appendBytes:buf length:(NSUInteger)n];
-    }
-    close(fds[0]);
++ (NSDictionary *)getJSON:(NSString *)path {
+    NSString *urlStr = [kServer stringByAppendingString:path];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) return @{@"ok": @NO};
 
-    int status = 0;
-    waitpid(pid, &status, 0);
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"GET";
+    req.timeoutInterval = 10;
 
-    NSString *s = [[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding];
-    return s ?: @"";
+    __block NSData *respData = nil;
+    __block NSError *respErr = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    NSURLSessionDataTask *task =
+        [[NSURLSession sharedSession] dataTaskWithRequest:req
+                                       completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            respData = d;
+            respErr = e;
+            dispatch_semaphore_signal(sem);
+        }];
+    [task resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)));
+
+    if (respErr || !respData) return @{@"ok": @NO};
+    id obj = [NSJSONSerialization JSONObjectWithData:respData options:0 error:nil];
+    return [obj isKindOfClass:[NSDictionary class]] ? obj : @{@"ok": @NO};
 }
 
 + (NSString *)startWithID:(NSString *)utdid {
-    NSString *arg = utdid.length > 0 ? [NSString stringWithFormat:@" %@", utdid] : @"";
-    return [self runShell:[NSString stringWithFormat:@"%@ on%@", kForgeBin, arg]];
+    NSMutableDictionary *b = [@{@"action": @"on"} mutableCopy];
+    if (utdid.length > 0) b[@"id"] = utdid;
+    NSDictionary *r = [self postJSON:@"/api/forge" body:b];
+    if ([r[@"ok"] boolValue]) {
+        return [NSString stringWithFormat:@"OK: injected\nUTDID: %@",
+                r[@"utdid"] ?: @"?"];
+    }
+    return [NSString stringWithFormat:@"FAIL: %@\n%@",
+            r[@"error"] ?: @"unknown",
+            r[@"log"] ?: @""];
 }
 
 + (NSString *)stop {
-    return [self runShell:[NSString stringWithFormat:@"%@ off", kForgeBin]];
+    NSDictionary *r = [self postJSON:@"/api/forge" body:@{@"action": @"off"}];
+    return [r[@"ok"] boolValue] ? @"stopped" : @"FAIL";
 }
 
 + (NSString *)status {
-    return [self runShell:[NSString stringWithFormat:@"%@ status", kForgeBin]];
+    NSDictionary *r = [self getJSON:@"/api/forge/status"];
+    if (![r[@"ok"] boolValue]) return @"server unreachable";
+    BOOL running = [r[@"running"] boolValue];
+    return [NSString stringWithFormat:@"state: %@\nutdid: %@\nserved: %@",
+            running ? @"running" : @"idle",
+            r[@"utdid"] ?: @"-",
+            r[@"served"] ?: @"0"];
 }
 
 + (NSString *)randomID {
@@ -75,39 +115,20 @@ static NSString *const kForgeLog = @"/var/jb/var/log/amap-forge.log";
 }
 
 + (BOOL)isRunning {
-    NSString *out = [self runShell:@"pgrep -x frida >/dev/null 2>&1 && echo YES || echo NO"];
-    return [out containsString:@"YES"];
+    NSDictionary *r = [self getJSON:@"/api/forge/status"];
+    return [r[@"running"] boolValue];
 }
 
 + (NSString *)currentID {
-    NSString *log = [NSString stringWithContentsOfFile:kForgeLog
-                                             encoding:NSUTF8StringEncoding
-                                                error:nil];
-    if (!log) return nil;
-    NSRange r = [log rangeOfString:@"forged UTDID="];
-    if (r.location == NSNotFound) return nil;
-    NSString *tail = [log substringFromIndex:r.location + r.length];
-    NSCharacterSet *stop = [[NSCharacterSet alphanumericCharacterSet] invertedSet];
-    NSRange end = [tail rangeOfCharacterFromSet:stop];
-    if (end.location == NSNotFound) return tail;
-    return [tail substringToIndex:end.location];
+    NSDictionary *r = [self getJSON:@"/api/forge/status"];
+    id v = r[@"utdid"];
+    return [v isKindOfClass:[NSString class]] ? v : nil;
 }
 
 + (NSInteger)servedCount {
-    NSString *log = [NSString stringWithContentsOfFile:kForgeLog
-                                             encoding:NSUTF8StringEncoding
-                                                error:nil];
-    if (!log) return 0;
-    NSInteger n = 0;
-    NSUInteger pos = 0;
-    while (pos < log.length) {
-        NSRange r = [log rangeOfString:@"'kind': 'served'" options:0
-                                 range:NSMakeRange(pos, log.length - pos)];
-        if (r.location == NSNotFound) break;
-        n++;
-        pos = r.location + r.length;
-    }
-    return n;
+    NSDictionary *r = [self getJSON:@"/api/forge/status"];
+    id v = r[@"served"];
+    return [v respondsToSelector:@selector(integerValue)] ? [v integerValue] : 0;
 }
 
 @end
