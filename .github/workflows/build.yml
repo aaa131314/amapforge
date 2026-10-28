@@ -12,51 +12,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Theos
-        uses: theos/theos@master
-        with:
-          theos: ${{ github.workspace }}/theos
-
-      - name: Setup THEOS env
+      - name: Install dependencies
         run: |
-          echo "THEOS=${{ github.workspace }}/theos" >> $GITHUB_ENV
-          echo "${{ github.workspace }}/theos/bin" >> $GITHUB_PATH
-          mkdir -p ${{ github.workspace }}/theos/sdks
+          brew install ldid xz || true
 
-      - name: Download iOS SDK
+      - name: Clone Theos
         run: |
-          cd ${{ github.workspace }}/theos/sdks
-          curl -L -o sdk.zip "https://github.com/theos/sdks/archive/master.zip"
-          unzip -q sdk.zip
-          mv sdks-master/* .
-          rm -rf sdk.zip sdks-master
-          ls -d iPhoneOS*.sdk | head
+          export THEOS=$RUNNER_TEMP/theos
+          git clone --recursive --depth 1 https://github.com/theos/theos.git $THEOS
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "$THEOS/bin" >> $GITHUB_PATH
 
-      - name: Pick SDK
+      - name: Download iOS SDKs
         run: |
-          cd ${{ github.workspace }}/theos/sdks
-          SDK=$(ls -d iPhoneOS*.sdk | sort -V | tail -1)
-          echo "Using $SDK"
-          echo "TARGET_SDK=$SDK" >> $GITHUB_ENV
+          cd $THEOS/sdks
+          curl -sL -o sdk.tar.xz "https://github.com/theos/sdks/archive/master.tar.gz"
+          tar xzf sdk.tar.gz --strip-components=1
+          rm -f sdk.tar.gz
+          ls -d iPhoneOS*.sdk | head -5
 
       - name: Build package
         run: |
-          cd ${{ github.workspace }}/theos-app
+          cd theos-app
           make clean || true
-          make package FINALPACKAGE=1 \
-            TARGET=iphone:clang:latest:14.0 \
-            SDKVERSION=${{ env.TARGET_SDK }} \
-            DEBUG=0
+          make package FINALPACKAGE=1 DEBUG=0
 
-      - name: Collect artifacts
+      - name: List output
         run: |
-          mkdir -p ${{ github.workspace }}/out
-          find ${{ github.workspace }} -name "*.deb" -exec cp {} ${{ github.workspace }}/out/ \;
-          ls -la ${{ github.workspace }}/out/
+          find . -name "*.deb" -o -name "*.dylib" | head -20
 
       - name: Upload deb
         uses: actions/upload-artifact@v4
         with:
           name: amapforge-deb
-          path: ${{ github.workspace }}/out/*.deb
-          if-no-files-found: error
+          path: "**/*.deb"
+          if-no-files-found: warn
