@@ -97,6 +97,11 @@ static void on_script_message(FridaScript *script, const gchar *message,
     NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:3000];
     if (![tcp hasPrefix:@"TCP OK"]) return [NSString stringWithFormat:@"FAIL: 端口不通\n%@", tcp];
 
+    const char *outPath = "/tmp/amap_wipe_result.json";
+    // 先删旧结果
+    [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/amap_wipe_result.json" error:nil];
+    unlink(outPath);
+
     GError *err = NULL;
     FridaDeviceManager *mgr = frida_device_manager_new();
     FridaDevice *dev = frida_device_manager_add_remote_device_sync(
@@ -137,36 +142,38 @@ static void on_script_message(FridaScript *script, const gchar *message,
         return [NSString stringWithFormat:@"FAIL: 创建脚本失败\n%@", e];
     }
 
-    gBuf = [NSMutableString string];
-    gWaitFor = waitFor;
-    g_signal_connect(script, "message", G_CALLBACK(on_script_message), NULL);
-
     frida_script_load_sync(script, NULL, &err);
     if (err) {
         NSString *e = [self errStr:err];
-        gBuf = nil; gWaitFor = nil;
         g_object_unref(script); g_object_unref(opts); g_object_unref(session);
         g_object_unref(dev); g_object_unref(mgr);
         return [NSString stringWithFormat:@"FAIL: 加载脚本失败\n%@", e];
     }
 
-    gLoop = g_main_loop_new(NULL, FALSE);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeoutSec * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        if (gLoop && g_main_loop_is_running(gLoop)) g_main_loop_quit(gLoop);
-    });
-    g_main_loop_run(gLoop);
-    g_main_loop_unref(gLoop);
-    gLoop = NULL;
-
-    NSString *result = [gBuf copy];
-    gBuf = nil;
-    gWaitFor = nil;
+    // 轮询等结果文件出现
+    NSString *result = nil;
+    for (int i = 0; i < timeoutSec * 4; i++) {
+        [NSThread sleepForTimeInterval:0.25];
+        NSData *d = [NSData dataWithContentsOfFile:@"/tmp/amap_wipe_result.json"];
+        if (d && d.length > 4) {
+            NSString *t = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+            if (t && [t containsString:waitFor]) {
+                result = t;
+                break;
+            }
+        }
+    }
 
     g_object_unref(script); g_object_unref(opts); g_object_unref(session);
     g_object_unref(dev); g_object_unref(mgr);
 
-    return result.length ? result : @"FAIL: 脚本无输出（可能被沙箱拦截）";
+    if (result) return result;
+
+    // 读不到文件 —— 检查是否沙箱拦
+    BOOL canReach = [[NSFileManager defaultManager] fileExistsAtPath:@"/tmp"];
+    return [NSString stringWithFormat:
+            @"FAIL: 脚本无输出\n/tmp 可达: %@\n进程: %@ (pid %u)\n尝试读: /tmp/amap_wipe_result.json",
+            canReach ? @"是" : @"否", procName, pid];
 }
 
 #pragma mark - 注入 UTDID
