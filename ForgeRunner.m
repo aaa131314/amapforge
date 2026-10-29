@@ -3,6 +3,20 @@
 // 电脑端 forge 服务（同一 WiFi 下）
 static NSString *const kServer = @"http://192.168.5.25:8050";
 
+
+static NSURLSession *_sharedSession(void) {
+    static NSURLSession *s = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.timeoutIntervalForRequest = 8;
+        cfg.timeoutIntervalForResource = 12;
+        cfg.HTTPMaximumConnectionsPerHost = 4;
+        s = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return s;
+}
+
 @implementation ForgeRunner
 
 + (NSDictionary *)postJSON:(NSString *)path body:(NSDictionary *)body timeout:(NSTimeInterval)t {
@@ -27,7 +41,7 @@ static NSString *const kServer = @"http://192.168.5.25:8050";
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     NSURLSessionDataTask *task =
-        [[NSURLSession sharedSession] dataTaskWithRequest:req
+        [_sharedSession() dataTaskWithRequest:req
                                        completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
             respData = d;
             respErr = e;
@@ -58,21 +72,21 @@ static NSString *const kServer = @"http://192.168.5.25:8050";
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"GET";
-    req.timeoutInterval = 15;
+    req.timeoutInterval = 6;
 
     __block NSData *respData = nil;
     __block NSError *respErr = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     NSURLSessionDataTask *task =
-        [[NSURLSession sharedSession] dataTaskWithRequest:req
+        [_sharedSession() dataTaskWithRequest:req
                                        completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
             respData = d;
             respErr = e;
             dispatch_semaphore_signal(sem);
         }];
     [task resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)));
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)));
 
     if (respErr || !respData) return @{@"ok": @NO};
     id obj = [NSJSONSerialization JSONObjectWithData:respData options:0 error:nil];
@@ -92,6 +106,13 @@ static NSString *const kServer = @"http://192.168.5.25:8050";
 + (NSString *)stop {
     NSDictionary *r = [self postJSON:@"/api/forge" body:@{@"action": @"off"}];
     return [r[@"ok"] boolValue] ? @"stopped" : @"FAIL";
+}
+
+
++ (NSDictionary *)statusDict {
+    NSDictionary *r = [self getJSON:@"/api/forge/status"];
+    if (![r isKindOfClass:[NSDictionary class]]) return @{@"ok": @NO};
+    return r;
 }
 
 + (NSString *)status {
@@ -130,16 +151,16 @@ static NSString *const kServer = @"http://192.168.5.25:8050";
 }
 
 + (BOOL)isRunning {
-    return [[self getJSON:@"/api/forge/status"] [@"running"] boolValue];
+    return [[self statusDict][@"running"] boolValue];
 }
 
 + (NSString *)currentID {
-    id v = [self getJSON:@"/api/forge/status"][@"utdid"];
+    id v = [self statusDict][@"utdid"];
     return [v isKindOfClass:[NSString class]] ? v : nil;
 }
 
 + (NSInteger)servedCount {
-    id v = [self getJSON:@"/api/forge/status"][@"served"];
+    id v = [self statusDict][@"served"];
     return [v respondsToSelector:@selector(integerValue)] ? [v integerValue] : 0;
 }
 
