@@ -151,8 +151,9 @@
             if (!reachable) {
                 self.statusLabel.text = @"🔴 frida-server 不可达";
                 self.statusLabel.textColor = [UIColor colorWithRed:0.85 green:0.25 blue:0.25 alpha:1.0];
-                self.idLabel.text = @"检查 frida-server 是否运行";
-                self.countLabel.text = @"";
+                id tcpRaw = st[@"tcp"];
+                self.idLabel.text = [tcpRaw isKindOfClass:[NSString class]] ? tcpRaw : @"TCP 探针失败";
+                self.countLabel.text = @"检查 frida-server 是否在跑";
                 return;
             }
             if (injected) {
