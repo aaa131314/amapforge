@@ -2,11 +2,51 @@
 
 // 直连本机 frida-server（完全离线，不需要电脑）
 #include "frida-core.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 static NSString *const kAppBundle = @"com.autonavi.amap";
 static NSString *const kRemoteAddr = @"127.0.0.1:27042";
 
 @implementation ForgeRunner
+
+#pragma mark - 原始 socket 检查（判断是网络还是 frida 库的问题）
+
++ (NSString *)tcpProbe:(NSString *)host port:(int)port timeoutMs:(int)ms {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return [NSString stringWithFormat:@"socket()失败 errno=%d", errno];
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    addr.sin_addr.s_addr = inet_addr(host.UTF8String);
+    int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
+        int e = errno;
+        close(fd);
+        return [NSString stringWithFormat:@"connect失败 errno=%d (%s)", e, strerror(e)];
+    }
+    fd_set wfds; FD_ZERO(&wfds); FD_SET(fd, &wfds);
+    struct timeval tv;
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    rc = select(fd + 1, NULL, &wfds, NULL, &tv);
+    if (rc == 0) { close(fd); return [NSString stringWithFormat:@"connect超时%dms", ms]; }
+    if (rc < 0) { int e = errno; close(fd); return [NSString stringWithFormat:@"select失败 errno=%d", e]; }
+    int soerr = 0; socklen_t len = sizeof(soerr);
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len);
+    close(fd);
+    if (soerr != 0) return [NSString stringWithFormat:@"SO_ERROR=%d (%s)", soerr, strerror(soerr)];
+    return [NSString stringWithFormat:@"TCP OK %@:%d", host, port];
+}
+
+
 
 #pragma mark - helpers
 
@@ -36,6 +76,11 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
 #pragma mark - core
 
 + (NSString *)injectSync {
+    NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:3000];
+    if (![tcp hasPrefix:@"TCP OK"]) {
+        return [NSString stringWithFormat:@"FAIL: 端口不通\n%@", tcp];
+    }
+
     GError *err = NULL;
     FridaDeviceManager *mgr = frida_device_manager_new();
     FridaDevice *dev = frida_device_manager_add_remote_device_sync(
@@ -146,6 +191,12 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
 }
 
 + (NSString *)probeSync {
+    // 先做原始 TCP 预检
+    NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:3000];
+    if (![tcp hasPrefix:@"TCP OK"]) {
+        return [NSString stringWithFormat:@"FAIL: 端口不通\n%@", tcp];
+    }
+
     GError *err = NULL;
     FridaDeviceManager *mgr = frida_device_manager_new();
     // 用 ref 保持存活，避免 dispatch_after 里的 use-after-free
@@ -167,10 +218,10 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
         dev, kAppBundle.UTF8String, NULL, NULL, NULL);
     NSString *s;
     if (p) {
-        s = [NSString stringWithFormat:@"running pid %u", frida_process_get_pid(p)];
+        s = [NSString stringWithFormat:@"running pid %u | %@", frida_process_get_pid(p), tcp];
         g_object_unref(p);
     } else {
-        s = @"idle";
+        s = [NSString stringWithFormat:@"idle | %@", tcp];
     }
     g_object_unref(dev);
     g_object_unref(mgr);
