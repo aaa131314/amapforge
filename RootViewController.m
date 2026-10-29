@@ -1,4 +1,5 @@
 #import "RootViewController.h"
+#import <WebKit/WebKit.h>
 #import "ForgeRunner.h"
 
 @interface RootViewController ()
@@ -115,6 +116,11 @@
     }
     [self.view addSubview:self.forgeBtn];
 
+    UIButton *mapBtn = [self btn:@"🗺 地图选点（拖动/搜索）" color:[UIColor colorWithRed:0.10 green:0.55 blue:0.45 alpha:1.0] h:32];
+    mapBtn.frame = CGRectMake(14, y + 186, w, 34);
+    [mapBtn addTarget:self action:@selector(onMapPick) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:mapBtn];
+    
     self.wipeBtn = [self btn:@"② 清理数据（身份+缓存+登录）" color:[UIColor colorWithRed:0.72 green:0.45 blue:0.10 alpha:1.0] h:40];
     self.wipeBtn.frame = CGRectMake(14, y + 62, w, 40);
     [self.wipeBtn addTarget:self action:@selector(onWipe) forControlEvents:UIControlEventTouchUpInside];
@@ -133,11 +139,11 @@
 
     self.stopBtn = [self btn:@"停止 / 恢复真实身份" color:[UIColor colorWithRed:0.25 green:0.27 blue:0.31 alpha:1.0] h:32];
     self.stopBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    self.stopBtn.frame = CGRectMake(14, y + 188, w, 32);
+    self.stopBtn.frame = CGRectMake(14, y + 224, w, 32);
     [self.stopBtn addTarget:self action:@selector(onStop) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.stopBtn];
 
-    CGFloat logY = y + 228;
+    CGFloat logY = y + 264;
     CGFloat logH = self.view.bounds.size.height - logY - 12;
     if (logH < 50) logH = 50;
     self.logView = [[UITextView alloc] initWithFrame:CGRectMake(14, logY, w, logH)];
@@ -303,6 +309,83 @@
         @"已设置伪装位置\n城市: %@\n坐标: %@, %@\n行政区: %@\n\n下次换身份生效",
         name, c[0], c[1], c[2]];
 }
+
+
+#pragma mark - 地图选点
+
+- (void)onMapPick {
+    @try {
+        NSString *base = [ForgeRunner serverAddr];
+        NSURL *url = [NSURL URLWithString:base];
+        if (!url) { self.logView.text = @"服务器地址无效"; return; }
+
+        WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
+        WKUserContentController *uc = [[WKUserContentController alloc] init];
+        [uc addScriptMessageHandler:nil name:@"setpos"];   // 占位，真实处理用 delegate
+        cfg.userContentController = uc;
+
+        WKWebView *wv = [[WKWebView alloc] initWithFrame:self.view.bounds configuration:cfg];
+        wv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        wv.navigationDelegate = (id<WKNavigationDelegate>)self;
+        wv.tag = 9001;
+
+        [self.view addSubview:wv];
+        [wv loadRequest:[NSURLRequest requestWithURL:url]];
+
+        // 关闭按钮
+        UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+        close.frame = CGRectMake(12, 44, 60, 36);
+        close.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85];
+        [close setTitle:@"关闭" forState:UIControlStateNormal];
+        [close setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        close.layer.cornerRadius = 8;
+        close.tag = 9002;
+        [close addTarget:self action:@selector(closeMap) forControlEvents:UIControlEventTouchUpInside];
+        [self.view addSubview:close];
+
+        self.logView.text = [NSString stringWithFormat:
+            @"地图已打开\n%@\n\n拖动地图或搜索地址，点「使用这个位置」", base];
+    } @catch (NSException *e) {
+        self.logView.text = [NSString stringWithFormat:@"地图打开失败: %@", e.reason];
+    }
+}
+
+- (void)closeMap {
+    [[self.view viewWithTag:9001] removeFromSuperview];
+    [[self.view viewWithTag:9002] removeFromSuperview];
+}
+
+// 拦截 amapforge://setpos?lat=..&lng=..
+- (void)webView:(WKWebView *)webView
+    decidePolicyForNavigationAction:(WKNavigationAction *)action
+                    decisionHandler:(void (^)(WKNavigationActionPolicy))handler {
+    NSURL *u = action.request.URL;
+    if (u && [u.scheme isEqualToString:@"amapforge"]) {
+        handler(WKNavigationActionPolicyCancel);
+        NSString *qs = u.query ?: @"";
+        NSMutableDictionary *kv = [NSMutableDictionary dictionary];
+        for (NSString *pair in [qs componentsSeparatedByString:@"&"]) {
+            NSArray *p2 = [pair componentsSeparatedByString:@"="];
+            if (p2.count == 2) kv[p2[0]] = p2[1];
+        }
+        double lat = [kv[@"lat"] doubleValue];
+        double lng = [kv[@"lng"] doubleValue];
+        if (lat != 0 && lng != 0) {
+            NSMutableDictionary *cfg = [[ForgeRunner spoofConfig] mutableCopy];
+            cfg[@"lat"] = @(lat);
+            cfg[@"lng"] = @(lng);
+            [ForgeRunner setSpoofConfig:cfg];
+            [self closeMap];
+            self.logView.text = [NSString stringWithFormat:
+                @"位置已设置\n坐标: %.6f, %.6f\n\n下次点「① 换一个新设备身份」生效",
+                lat, lng];
+        }
+        return;
+    }
+    handler(WKNavigationActionPolicyAllow);
+}
+
+#pragma mark - 地图选点结束
 
 - (void)onRefresh {
     if (self.busy) return;
