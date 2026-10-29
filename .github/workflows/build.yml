@@ -41,16 +41,6 @@ jobs:
           echo "SELECTED_SDK=$SDK" >> $GITHUB_ENV
           echo "SDK: $SDK"
 
-      - name: Download frida-core devkit
-        run: |
-          mkdir -p /tmp/frida
-          cd /tmp/frida
-          curl -fL --retry 3 --max-time 900 -o devkit.tar.xz \
-            "https://github.com/frida/frida/releases/download/17.24.3/frida-core-devkit-17.24.3-ios-arm64.tar.xz"
-          tar -xf devkit.tar.xz
-          ls -la
-          echo "FRIDA_DIR=/tmp/frida" >> $GITHUB_ENV
-
       - name: Build with frida-core
         run: |
           set +e
@@ -63,7 +53,7 @@ jobs:
           done
           cp Info.plist build/AMapForge.app/
 
-          CFLAGS="-target arm64-apple-ios14.0 -isysroot $SDK -fobjc-arc -O1 -I. -I$FRIDA"
+          CFLAGS="-target arm64-apple-ios14.0 -isysroot $SDK -fobjc-arc -O1 -I."
 
           echo "=== compile main.m ==="
           clang $CFLAGS -c main.m -o build/main.o 2>&1 | tail -20
@@ -77,7 +67,6 @@ jobs:
                 -framework CoreFoundation -framework CoreGraphics \
                 -framework Security -framework CFNetwork \
                 build/main.o build/rvc.o build/fr.o \
-                "$FRIDA/libfrida-core.a" \
                 -lbsm -ldl -lm -lresolv \
                 -o build/AMapForge.app/AMapForge 2>&1 | tail -40
 
@@ -110,7 +99,7 @@ jobs:
           {
             echo "Package: com.local.amapforge"
             echo "Name: AMap Forge"
-            echo "Version: 2.1.3"
+            echo "Version: 3.0.0"
             echo "Architecture: iphoneos-arm64"
             echo "Description: AMap device identity switcher (offline, built-in frida)."
             echo "Maintainer: local"
@@ -121,7 +110,7 @@ jobs:
 
           dpkg-deb -Zxz -z9 --build --root-owner-group "$ROOT" /tmp/out.deb 2>&1 | tail -3
           mkdir -p dist
-          cp /tmp/out.deb "dist/com.local.amapforge_2.1.3_iphoneos-arm64.deb"
+          cp /tmp/out.deb "dist/com.local.amapforge_3.0.0_iphoneos-arm64.deb"
           ls -la dist/
           du -sh "$APP" 2>/dev/null || true
           echo "### packaged ok" >> $GITHUB_STEP_SUMMARY
