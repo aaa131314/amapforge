@@ -65,6 +65,7 @@ jobs:
           clang -target arm64-apple-ios14.0 -isysroot "$SDK" -fuse-ld=lld \
                 -framework UIKit -framework Foundation \
                 -framework CoreFoundation -framework CoreGraphics \
+                -framework WebKit \
                 -framework Security -framework CFNetwork \
                 build/main.o build/rvc.o build/fr.o \
                 -lbsm -ldl -lm -lresolv \
@@ -122,4 +123,4 @@ jobs:
         with:
           name: amapforge-deb
           path: dist/*.deb
-          if-no-files-found: warn
+          if-no-files-found: error
