@@ -148,8 +148,15 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
 + (NSString *)probeSync {
     GError *err = NULL;
     FridaDeviceManager *mgr = frida_device_manager_new();
+    GCancellable *cancel = g_cancellable_new();
+    // 5 秒后自动取消，避免无限等待
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        g_cancellable_cancel(cancel);
+    });
     FridaDevice *dev = frida_device_manager_add_remote_device_sync(
-        mgr, kRemoteAddr.UTF8String, NULL, NULL, &err);
+        mgr, kRemoteAddr.UTF8String, NULL, cancel, &err);
+    g_object_unref(cancel);
     if (!dev) {
         NSString *e = [self errStr:err];
         g_object_unref(mgr);
