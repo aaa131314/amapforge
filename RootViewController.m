@@ -136,13 +136,24 @@
     [self.view addSubview:self.logView];
 }
 
-/// 轻量刷新：只打 HTTP GET /api/forge/status（毫秒级，不 spawn）
+/// 轻量刷新：一次 HTTP 请求拿全部状态（不再重复请求三次）
 - (void)refreshLight {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        BOOL running = [ForgeRunner isRunning];
-        NSString *idv = running ? [ForgeRunner currentID] : nil;
-        NSInteger served = [ForgeRunner servedCount];
+        NSDictionary *st = [ForgeRunner statusDict];
+        BOOL running = [st[@"running"] boolValue];
+        id idRaw = st[@"utdid"];
+        NSString *idv = [idRaw isKindOfClass:[NSString class]] ? idRaw : nil;
+        NSInteger served = [st[@"served"] respondsToSelector:@selector(integerValue)]
+                            ? [st[@"served"] integerValue] : 0;
+        BOOL reachable = [st[@"ok"] boolValue];
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (!reachable) {
+                self.statusLabel.text = @"🔴 连不上电脑服务";
+                self.statusLabel.textColor = [UIColor colorWithRed:0.85 green:0.25 blue:0.25 alpha:1.0];
+                self.idLabel.text = @"检查 8050 服务和隧道";
+                self.countLabel.text = @"";
+                return;
+            }
             self.statusLabel.text = running ? @"🟢 正在伪造设备身份" : @"⚪️ 使用真实设备身份";
             self.statusLabel.textColor = running
                 ? [UIColor colorWithRed:0.25 green:0.73 blue:0.31 alpha:1.0]
