@@ -325,9 +325,7 @@
         if (!url) { self.logView.text = @"服务器地址无效"; return; }
 
         WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
-        WKUserContentController *uc = [[WKUserContentController alloc] init];
-        [uc addScriptMessageHandler:nil name:@"setpos"];   // 占位，真实处理用 delegate
-        cfg.userContentController = uc;
+        cfg.userContentController = [[WKUserContentController alloc] init];
 
         WKWebView *wv = [[WKWebView alloc] initWithFrame:self.view.bounds configuration:cfg];
         wv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -349,7 +347,19 @@
         [self.view addSubview:close];
 
         self.logView.text = [NSString stringWithFormat:
-            @"地图已打开\n%@\n\n拖动地图或搜索地址，点「使用这个位置」", base];
+            @"地图加载中…\n%@\n\n拖动或搜索地址，点「使用这个位置」", base];
+
+        // 8 秒后如果还没加载完，提示
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            WKWebView *v = (WKWebView *)[self.view viewWithTag:9001];
+            if (v && v.loading) {
+                self.logView.text = [NSString stringWithFormat:
+                    @"地图加载较慢…\n%@\n\n"
+                    @"如果一直空白，可能是网络问题。\n"
+                    @"可以先用「① 换一个新设备身份」再试。", base];
+            }
+        });
     } @catch (NSException *e) {
         self.logView.text = [NSString stringWithFormat:@"地图打开失败: %@", e.reason];
     }
@@ -358,6 +368,34 @@
 - (void)closeMap {
     [[self.view viewWithTag:9001] removeFromSuperview];
     [[self.view viewWithTag:9002] removeFromSuperview];
+}
+
+- (void)webView:(WKWebView *)webView
+    didFailProvisionalNavigation:(WKNavigation *)navigation
+                     withError:(NSError *)error {
+    self.logView.text = [NSString stringWithFormat:
+        @"地图加载失败\n%@\n\n(domain=%@ code=%ld)",
+        error.localizedDescription, error.domain, (long)error.code];
+}
+
+- (void)webView:(WKWebView *)webView
+    didFailNavigation:(WKNavigation *)navigation
+            withError:(NSError *)error {
+    self.logView.text = [NSString stringWithFormat:
+        @"地图导航失败\n%@", error.localizedDescription];
+}
+
+- (void)webView:(WKWebView *)webView
+    didFinishNavigation:(WKNavigation *)navigation {
+    WKWebView *v = (WKWebView *)webView;
+    // 注入一段脚本，把按钮点击转成 console 或者直接改 document.title
+    [v evaluateJavaScript:@"document.title" completionHandler:^(id r, NSError *e) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.logView.text = [NSString stringWithFormat:
+                @"地图已加载\n标题: %@\n\n拖动或搜索地址，点「使用这个位置」",
+                r ?: @"(空)"];
+        });
+    }];
 }
 
 // 拦截 amapforge://setpos?lat=..&lng=..
