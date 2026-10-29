@@ -22,8 +22,9 @@
     self.title = @"设备身份";
     self.view.backgroundColor = [UIColor colorWithRed:0.043 green:0.059 blue:0.078 alpha:1.0];
     [self buildUI];
-    // 只查轻量状态（HTTP GET，毫秒级）
-    [self refreshLight];
+    // 启动时不做任何 frida 调用（同步 API 可能长时间阻塞）
+    // 用户点「刷新状态」才连 frida-server
+    self.logView.text = @"就绪。点「刷新状态」检查 frida-server。";
 }
 
 - (UILabel *)smallLabel:(NSString *)t {
