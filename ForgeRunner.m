@@ -65,7 +65,15 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
         q = dispatch_queue_create("amapforge.frida", DISPATCH_QUEUE_SERIAL);
         frida_init();
     });
-    dispatch_async(q, block);
+    dispatch_async(q, ^{
+        @try {
+            block();
+        } @catch (NSException *e) {
+            NSLog(@"[amapforge] 异常: %@ %@", e.name, e.reason);
+        } @catch (...) {
+            NSLog(@"[amapforge] 未知异常");
+        }
+    });
 }
 
 + (NSString *)errStr:(GError *)e {
@@ -242,6 +250,7 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
 }
 
 + (NSDictionary *)statusDict {
+    @try {
     // 1) 注入标记（本地记录，不依赖高德进程）
     BOOL injected = [self isInjected];
     NSString *forged = [self currentForgedID];
@@ -276,6 +285,10 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
              @"utdid": forged ?: @"",
              @"proc": proc,
              @"tcp": tcp};
+    } @catch (NSException *e) {
+        return @{@"ok": @NO, @"running": @NO, @"utdid": @"",
+                 @"proc": @"", @"tcp": [NSString stringWithFormat:@"异常: %@", e.name]};
+    }
 }
 
 + (NSString *)shellOut:(NSString *)cmd timeoutSec:(int)timeoutSec {
@@ -289,9 +302,15 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
     posix_spawn_file_actions_addclose(&actions, fds[1]);
 
     const char *bash = "/var/jb/usr/bin/bash";
-    char *argv[] = {(char *)bash, (char *)"-lc", (char *)[cmd UTF8String], NULL};
+    // 关键：把 cmd 拷到 C 缓冲，避免 autorelease 导致悬空指针
+    size_t cmdLen = strlen([cmd UTF8String]) + 1;
+    char *cmdBuf = (char *)malloc(cmdLen);
+    if (!cmdBuf) { close(fds[0]); return @"内存不足"; }
+    memcpy(cmdBuf, [cmd UTF8String], cmdLen);
+    char *argv[] = {(char *)bash, (char *)"-lc", cmdBuf, NULL};
     pid_t pid = 0;
     int rc = posix_spawn(&pid, bash, &actions, NULL, argv, environ);
+    free(cmdBuf);
     posix_spawn_file_actions_destroy(&actions);
     close(fds[1]);
     if (rc != 0) { close(fds[0]); return [NSString stringWithFormat:@"posix_spawn err=%d (%s)", rc, strerror(rc)]; }
@@ -314,6 +333,7 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
 }
 
 + (NSString *)wipeData:(BOOL)deep {
+    @try {
     NSString *cmd = deep ? @"/var/jb/usr/bin/amap-wipe run --deep"
                          : @"/var/jb/usr/bin/amap-wipe run";
     if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/amap-wipe"]) {
@@ -321,13 +341,20 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
     }
     NSString *r = [self shellOut:cmd timeoutSec:120];
     return r.length ? r : @"FAIL: 无输出";
+    } @catch (NSException *e) {
+        return [NSString stringWithFormat:@"FAIL: %@ %@", e.name, e.reason];
+    }
 }
 
 + (NSString *)dataSizeText {
-    if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/amap-wipe"]) {
-        return @"FAIL: 未安装 amap-wipe";
+    @try {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/amap-wipe"]) {
+            return @"FAIL: 未安装 amap-wipe";
+        }
+        return [self shellOut:@"/var/jb/usr/bin/amap-wipe size" timeoutSec:90];
+    } @catch (NSException *e) {
+        return [NSString stringWithFormat:@"FAIL: %@ %@", e.name, e.reason];
     }
-    return [self shellOut:@"/var/jb/usr/bin/amap-wipe size" timeoutSec:90];
 }
 
 + (NSString *)dataSize {
