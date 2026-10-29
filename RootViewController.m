@@ -120,6 +120,11 @@
     mapBtn.frame = CGRectMake(14, y + 186, w, 34);
     [mapBtn addTarget:self action:@selector(onMapPick) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:mapBtn];
+
+    UIButton *poiBtn = [self btn:@"📤 提交新增地点" color:[UIColor colorWithRed:0.62 green:0.24 blue:0.68 alpha:1.0] h:34];
+    poiBtn.frame = CGRectMake(14, y + 226, w, 34);
+    [poiBtn addTarget:self action:@selector(onSubmitPOI) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:poiBtn];
     
     self.wipeBtn = [self btn:@"② 清理数据（身份+缓存+登录）" color:[UIColor colorWithRed:0.72 green:0.45 blue:0.10 alpha:1.0] h:40];
     self.wipeBtn.frame = CGRectMake(14, y + 62, w, 40);
@@ -139,11 +144,11 @@
 
     self.stopBtn = [self btn:@"停止 / 恢复真实身份" color:[UIColor colorWithRed:0.25 green:0.27 blue:0.31 alpha:1.0] h:32];
     self.stopBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    self.stopBtn.frame = CGRectMake(14, y + 224, w, 32);
+    self.stopBtn.frame = CGRectMake(14, y + 268, w, 32);
     [self.stopBtn addTarget:self action:@selector(onStop) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.stopBtn];
 
-    CGFloat logY = y + 264;
+    CGFloat logY = y + 308;
     CGFloat logH = self.view.bounds.size.height - logY - 12;
     if (logH < 50) logH = 50;
     self.logView = [[UITextView alloc] initWithFrame:CGRectMake(14, logY, w, logH)];
@@ -386,6 +391,88 @@
 }
 
 #pragma mark - 地图选点结束
+
+
+#pragma mark - POI submit
+
+- (void)onSubmitPOI {
+    NSDictionary *cfg = [ForgeRunner spoofConfig];
+    NSNumber *lat = cfg[@"lat"] ?: @39.9042;
+    NSNumber *lng = cfg[@"lng"] ?: @116.4074;
+
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"新增地点"
+                         message:[NSString stringWithFormat:
+                                  @"坐标：%.6f, %.6f\n（用「🗺 地图选点」可改）",
+                                  [lat doubleValue], [lng doubleValue]]
+                  preferredStyle:UIAlertControllerStyleAlert];
+
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"地点名称（必填）";
+    }];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"详细地址";
+    }];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"电话（可选）";
+        tf.keyboardType = UIKeyboardTypePhonePad;
+    }];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"营业时间（可选，如 09:00-22:00）";
+    }];
+
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"提交" style:UIAlertActionStyleDefault
+                                       handler:^(UIAlertAction *x) {
+        NSString *name = a.textFields[0].text ?: @"";
+        NSString *addr = a.textFields[1].text ?: @"";
+        NSString *tel = a.textFields[2].text ?: @"";
+        NSString *hours = a.textFields[3].text ?: @"";
+        name = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (name.length == 0) {
+            self.logView.text = @"地点名称必填";
+            return;
+        }
+        [self doSubmitPOI:name addr:addr tel:tel hours:hours lat:lat lng:lng];
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)doSubmitPOI:(NSString *)name addr:(NSString *)addr
+                tel:(NSString *)tel hours:(NSString *)hours
+                lat:(NSNumber *)lat lng:(NSNumber *)lng {
+    [self setBusy:YES];
+    self.logView.text = [NSString stringWithFormat:
+        @"正在提交…\n名称: %@\n地址: %@\n坐标: %.6f, %.6f",
+        name, addr, [lat doubleValue], [lng doubleValue]];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSDictionary *r = [ForgeRunner submitPOI:@{
+            @"name": name, @"addr": addr, @"tel": tel ?: @"",
+            @"hours": hours ?: @"", @"lat": lat ?: @0,
+            @"lng": lng ?: @0, @"cat": @"050000"
+        }];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setBusy:NO];
+            if ([r[@"ok"] boolValue]) {
+                id rid = r[@"record_id"];
+                id tid = r[@"tid"];
+                self.logView.text = [NSString stringWithFormat:
+                    @"✅ 提交成功\nrecord_id: %@\ntid: %@\n\n名称: %@",
+                    rid ?: @"?", tid ?: @"?", name];
+            } else {
+                id e = r[@"error"];
+                id c = r[@"code"];
+                id m = r[@"message"];
+                self.logView.text = [NSString stringWithFormat:
+                    @"❌ 提交失败\n%@\ncode: %@  msg: %@",
+                    e ?: @"?", c ?: @"-", m ?: @"-"];
+            }
+        });
+    });
+}
+
+#pragma mark - POI submit end
 
 - (void)onRefresh {
     if (self.busy) return;
