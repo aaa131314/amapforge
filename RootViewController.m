@@ -199,8 +199,17 @@
 }
 
 - (void)onRefresh {
-    [self refreshLight];
-    self.logView.text = @"已刷新";
+    if (self.busy) return;
+    [self setBusy:YES];
+    [self log:@"正在测试连通性…"];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *t = [ForgeRunner connectTest];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.logView.text = t;
+            [self setBusy:NO];
+            [self refreshLight];
+        });
+    });
 }
 
 - (void)onForge {
