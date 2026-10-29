@@ -19,8 +19,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// 清理高德数据（deep=YES 连离线地图一起删）
 + (NSString *)wipeData:(BOOL)deep;
 
-/// 数据体积
+/// 数据体积（简短）
 + (NSString *)dataSize;
+
+/// 数据体积（原始输出）
++ (NSString *)dataSizeText;
 
 /// 生成随机 22 位 ID
 + (NSString *)randomID;
