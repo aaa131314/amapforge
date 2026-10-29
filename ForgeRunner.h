@@ -28,6 +28,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 连通测试（TCP + frida）
 + (NSString *)connectTest;
 
+/// 读取伪装参数
++ (NSDictionary *)spoofConfig;
+
+/// 保存伪装参数
++ (void)setSpoofConfig:(NSDictionary *)cfg;
+
 /// 当前服务器地址
 + (NSString *)serverAddr;
 
