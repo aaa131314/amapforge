@@ -1,376 +1,246 @@
 #import "ForgeRunner.h"
 
-// 直连本机 frida-server（完全离线）
-#include "frida-core.h"
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <netdb.h>
-#include <spawn.h>
-#include <sys/wait.h>
+// 走电脑：通过 Cloudflare 公网隧道（手机可用 4G）
+static NSString *const kServer = @"https://guide-juan-collector-calls.trycloudflare.com";
 
-extern char **environ;
-
-static NSString *const kAppBundle = @"com.autonavi.amap";
-static NSString *const kRemoteAddr = @"127.0.0.1:27042";
-
-// ---- GLib 主循环（收 send() 消息）----
-@implementation ForgeRunner
-
-#pragma mark - socket 预检
-
-+ (NSString *)tcpProbe:(NSString *)host port:(int)port timeoutMs:(int)ms {
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    char portStr[16];
-    snprintf(portStr, sizeof(portStr), "%d", port);
-    int gai = getaddrinfo(host.UTF8String, portStr, &hints, &res);
-    if (gai != 0 || !res) {
-        return [NSString stringWithFormat:@"getaddrinfo 失败 gai=%d", gai];
-    }
-
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
-        freeaddrinfo(res);
-        return [NSString stringWithFormat:@"socket() 失败 errno=%d", errno];
-    }
-
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-
-    if (rc < 0 && errno != EINPROGRESS) {
-        int e = errno; close(fd);
-        return [NSString stringWithFormat:@"connect 立即失败 errno=%d (%s)", e, strerror(e)];
-    }
-    if (rc == 0) { close(fd); return [NSString stringWithFormat:@"TCP OK %@:%d（直连成功）", host, port]; }
-
-    fd_set wfds; FD_ZERO(&wfds); FD_SET(fd, &wfds);
-    struct timeval tv;
-    tv.tv_sec = ms / 1000;
-    tv.tv_usec = (ms % 1000) * 1000;
-    rc = select(fd + 1, NULL, &wfds, NULL, &tv);
-    if (rc == 0) { close(fd); return [NSString stringWithFormat:@"connect 超时 %dms", ms]; }
-    if (rc < 0) { int e = errno; close(fd); return [NSString stringWithFormat:@"select 失败 errno=%d", e]; }
-
-    int soerr = 0; socklen_t slen = sizeof(soerr);
-    getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
-    close(fd);
-    if (soerr != 0) {
-        return [NSString stringWithFormat:@"SO_ERROR=%d (%s)", soerr, strerror(soerr)];
-    }
-    return [NSString stringWithFormat:@"TCP OK %@:%d", host, port];
-}
-
-#pragma mark - helpers
-
-+ (NSString *)jsSourceNamed:(NSString *)name {
-    NSString *p = [[NSBundle mainBundle] pathForResource:name ofType:@"js"];
-    if (!p) return nil;
-    return [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
-}
-
-+ (void)runOnFridaThread:(void (^)(void))block {
-    static dispatch_queue_t q;
+static NSURLSession *_sharedSession(void) {
+    static NSURLSession *s = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        q = dispatch_queue_create("amapforge.frida", DISPATCH_QUEUE_SERIAL);
-        frida_init();
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.timeoutIntervalForRequest = 30;
+        cfg.timeoutIntervalForResource = 150;
+        cfg.HTTPMaximumConnectionsPerHost = 4;
+        cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+        s = [NSURLSession sessionWithConfiguration:cfg];
     });
-    dispatch_async(q, ^{
-        @try {
-            block();
-        } @catch (NSException *e) {
-            NSLog(@"[amapforge] 异常: %@ %@", e.name, e.reason);
-        } @catch (...) {
-            NSLog(@"[amapforge] 未知异常");
-        }
-    });
-}
-
-+ (NSString *)errStr:(GError *)e {
-    if (!e) return @"";
-    NSString *s = [NSString stringWithFormat:@"%s", e->message];
-    g_error_free(e);
     return s;
 }
 
-#pragma mark - 注入 UTDID
+@implementation ForgeRunner
 
-+ (NSString *)injectSync {
-    NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:3000];
-    if (![tcp hasPrefix:@"TCP OK"]) return [NSString stringWithFormat:@"FAIL: 端口不通\n%@", tcp];
+#pragma mark - HTTP
 
-    GError *err = NULL;
-    FridaDeviceManager *mgr = frida_device_manager_new();
-    FridaDevice *dev = frida_device_manager_add_remote_device_sync(
-        mgr, kRemoteAddr.UTF8String, NULL, NULL, &err);
-    if (!dev) {
-        NSString *e = [self errStr:err];
-        g_object_unref(mgr);
-        return [NSString stringWithFormat:@"FAIL: frida 连接失败\n%@", e];
-    }
-
-    FridaProcess *old = frida_device_get_process_by_name_sync(
-        dev, kAppBundle.UTF8String, NULL, NULL, NULL);
-    if (old) {
-        frida_device_kill_sync(dev, frida_process_get_pid(old), NULL, &err);
-        if (err) { g_error_free(err); err = NULL; }
-        g_object_unref(old);
-        [NSThread sleepForTimeInterval:1.0];
-    }
-
-    guint pid = frida_device_spawn_sync(dev, kAppBundle.UTF8String, NULL, NULL, &err);
-    if (pid == 0) {
-        NSString *e = [self errStr:err];
-        g_object_unref(dev); g_object_unref(mgr);
-        return [NSString stringWithFormat:@"FAIL: spawn 失败\n%@", e];
-    }
-
-    FridaSession *session = frida_device_attach_sync(dev, pid, NULL, NULL, &err);
-    if (!session) {
-        NSString *e = [self errStr:err];
-        g_object_unref(dev); g_object_unref(mgr);
-        return [NSString stringWithFormat:@"FAIL: attach 失败 (pid %u)\n%@", pid, e];
-    }
-
-    NSString *js = [self jsSourceNamed:@"forge_utdid"];
-    if (!js) {
-        g_object_unref(session); g_object_unref(dev); g_object_unref(mgr);
-        return @"FAIL: 包内缺少 forge_utdid.js";
-    }
-
-    FridaScriptOptions *opts = frida_script_options_new();
-    frida_script_options_set_name(opts, "forge");
-    frida_script_options_set_runtime(opts, FRIDA_SCRIPT_RUNTIME_QJS);
-
-    FridaScript *script = frida_session_create_script_sync(
-        session, js.UTF8String, opts, NULL, &err);
-    if (!script) {
-        NSString *e = [self errStr:err];
-        g_object_unref(opts); g_object_unref(session);
-        g_object_unref(dev); g_object_unref(mgr);
-        return [NSString stringWithFormat:@"FAIL: 创建脚本失败\n%@", e];
-    }
-
-    frida_script_load_sync(script, NULL, &err);
-    if (err) {
-        NSString *e = [self errStr:err];
-        g_object_unref(script); g_object_unref(opts); g_object_unref(session);
-        g_object_unref(dev); g_object_unref(mgr);
-        return [NSString stringWithFormat:@"FAIL: 加载脚本失败\n%@", e];
-    }
-
-    frida_device_resume_sync(dev, pid, NULL, &err);
-    if (err) { g_error_free(err); err = NULL; }
-    [NSThread sleepForTimeInterval:2.0];
-
-    g_object_unref(script); g_object_unref(opts); g_object_unref(session);
-    g_object_unref(dev); g_object_unref(mgr);
-
-    // 记录注入状态（供状态显示用，不依赖高德进程是否存活）
-    NSString *forged = [self currentForgedID];
-    if (!forged) {
-        forged = [self randomID];
-    }
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setBool:YES forKey:@"amapforge_injected"];
-    [ud setObject:forged forKey:@"amapforge_utdid"];
-    [ud setObject:[NSDate date] forKey:@"amapforge_inject_time"];
-    [ud synchronize];
-
-    return [NSString stringWithFormat:@"OK: 已注入 %@ (pid %u)\n设备 ID: %@", kAppBundle, pid, forged];
-}
-
-+ (NSString *)detachSync {
-    GError *err = NULL;
-    FridaDeviceManager *mgr = frida_device_manager_new();
-    FridaDevice *dev = frida_device_manager_add_remote_device_sync(
-        mgr, kRemoteAddr.UTF8String, NULL, NULL, &err);
-    if (!dev) {
-        NSString *e = [self errStr:err];
-        g_object_unref(mgr);
-        return [NSString stringWithFormat:@"FAIL: 连接失败\n%@", e];
-    }
-    FridaProcess *p = frida_device_get_process_by_name_sync(
-        dev, kAppBundle.UTF8String, NULL, NULL, NULL);
-    if (p) {
-        frida_device_kill_sync(dev, frida_process_get_pid(p), NULL, &err);
-        if (err) { g_error_free(err); err = NULL; }
-        g_object_unref(p);
-        g_object_unref(dev); g_object_unref(mgr);
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        [ud setBool:NO forKey:@"amapforge_injected"];
-        [ud removeObjectForKey:@"amapforge_utdid"];
-        [ud synchronize];
-        return @"OK: 高德已停止，恢复真实身份";
-    }
-    g_object_unref(dev); g_object_unref(mgr);
-    return @"OK: 高德未运行";
-}
-
-+ (NSString *)probeSync {
-    NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:3000];
-    if (![tcp hasPrefix:@"TCP OK"]) return [NSString stringWithFormat:@"FAIL: 端口不通\n%@", tcp];
-
-    GError *err = NULL;
-    FridaDeviceManager *mgr = frida_device_manager_new();
-    FridaDevice *dev = frida_device_manager_add_remote_device_sync(
-        mgr, kRemoteAddr.UTF8String, NULL, NULL, &err);
-    if (!dev) {
-        NSString *e = [self errStr:err];
-        g_object_unref(mgr);
-        return [NSString stringWithFormat:@"FAIL: frida 库连不上\nTCP: %@\nfrida: %@", tcp, e];
-    }
-    FridaProcess *p = frida_device_get_process_by_name_sync(
-        dev, kAppBundle.UTF8String, NULL, NULL, NULL);
-    NSString *s;
-    if (p) {
-        s = [NSString stringWithFormat:@"running pid %u | %@", frida_process_get_pid(p), tcp];
-        g_object_unref(p);
-    } else {
-        s = [NSString stringWithFormat:@"idle | %@", tcp];
-    }
-    g_object_unref(dev); g_object_unref(mgr);
-    return s;
-}
-
-
-/// 连通测试（TCP + frida），返回字符串结果
-+ (NSString *)connectTest {
++ (NSDictionary *)postJSON:(NSString *)path body:(NSDictionary *)body timeout:(NSTimeInterval)t {
     @try {
-        NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:3000];
-        if (![tcp hasPrefix:@"TCP OK"]) return tcp;
-        return [NSString stringWithFormat:@"%@ | %@", tcp, [self probeSync]];
+        NSURL *url = [NSURL URLWithString:[kServer stringByAppendingString:path]];
+        if (!url) return @{@"ok": @NO, @"error": @"URL 无效"};
+
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+        req.HTTPMethod = @"POST";
+        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+        req.timeoutInterval = t;
+
+        NSError *err = nil;
+        NSData *payload = [NSJSONSerialization dataWithJSONObject:body ?: @{}
+                                                         options:0 error:&err];
+        if (err) return @{@"ok": @NO, @"error": err.localizedDescription};
+        req.HTTPBody = payload;
+
+        __block NSData *respData = nil;
+        __block NSError *respErr = nil;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+        [[_sharedSession() dataTaskWithRequest:req
+            completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+                respData = d; respErr = e;
+                dispatch_semaphore_signal(sem);
+            }] resume];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)((t + 15) * NSEC_PER_SEC)));
+
+        if (respErr) return @{@"ok": @NO, @"error": respErr.localizedDescription ?: @"网络错误"};
+        if (!respData) return @{@"ok": @NO, @"error": @"超时"};
+
+        id obj = [NSJSONSerialization JSONObjectWithData:respData options:0 error:nil];
+        return [obj isKindOfClass:[NSDictionary class]] ? obj : @{@"ok": @NO, @"error": @"格式错误"};
     } @catch (NSException *e) {
-        return [NSString stringWithFormat:@"异常: %@ / %@", e.name, e.reason];
+        return @{@"ok": @NO, @"error": e.reason ?: e.name ?: @"异常"};
     }
+}
+
++ (NSDictionary *)getJSON:(NSString *)path {
+    @try {
+        NSURL *url = [NSURL URLWithString:[kServer stringByAppendingString:path]];
+        if (!url) return @{@"ok": @NO};
+
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+        req.HTTPMethod = @"GET";
+        req.timeoutInterval = 30;
+
+        __block NSData *respData = nil;
+        __block NSError *respErr = nil;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+        [[_sharedSession() dataTaskWithRequest:req
+            completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+                respData = d; respErr = e;
+                dispatch_semaphore_signal(sem);
+            }] resume];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(45 * NSEC_PER_SEC)));
+
+        if (respErr || !respData) {
+            return @{@"ok": @NO, @"error": respErr.localizedDescription ?: @"超时"};
+        }
+        id obj = [NSJSONSerialization JSONObjectWithData:respData options:0 error:nil];
+        return [obj isKindOfClass:[NSDictionary class]] ? obj : @{@"ok": @NO};
+    } @catch (NSException *e) {
+        return @{@"ok": @NO};
+    }
+}
+
++ (NSString *)str:(id)v def:(NSString *)d {
+    return [v isKindOfClass:[NSString class]] ? v : d;
 }
 
 #pragma mark - public
 
 + (NSString *)startWithID:(NSString *)utdid {
-    __block NSString *r = @"timeout";
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [self runOnFridaThread:^{ r = [self injectSync]; dispatch_semaphore_signal(sem); }];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(90 * NSEC_PER_SEC)));
-    return r;
+    @try {
+        NSMutableDictionary *b = [NSMutableDictionary dictionary];
+        [b setObject:@"on" forKey:@"action"];
+        if (utdid.length > 0) [b setObject:utdid forKey:@"id"];
+
+        NSDictionary *r = [self postJSON:@"/api/forge" body:b timeout:90];
+        if ([r[@"ok"] boolValue]) {
+            NSString *u = [self str:r[@"utdid"] def:@""];
+            NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+            [ud setBool:YES forKey:@"amapforge_injected"];
+            if (u.length) [ud setObject:u forKey:@"amapforge_utdid"];
+            [ud synchronize];
+            return [NSString stringWithFormat:@"OK: 已注入\nUTDID: %@", u.length ? u : @"?"];
+        }
+        return [NSString stringWithFormat:@"FAIL: %@\n%@",
+                [self str:r[@"error"] def:@"unknown"],
+                [self str:r[@"log"] def:@""]];
+    } @catch (NSException *e) {
+        return [NSString stringWithFormat:@"FAIL: %@", e.reason ?: e.name];
+    }
 }
 
 + (NSString *)stop {
-    __block NSString *r = @"timeout";
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [self runOnFridaThread:^{ r = [self detachSync]; dispatch_semaphore_signal(sem); }];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)));
-    return r;
+    @try {
+        NSDictionary *r = [self postJSON:@"/api/forge" body:@{@"action": @"off"} timeout:30];
+        if ([r[@"ok"] boolValue]) {
+            NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+            [ud setBool:NO forKey:@"amapforge_injected"];
+            [ud removeObjectForKey:@"amapforge_utdid"];
+            [ud synchronize];
+            return @"OK: 已停止，恢复真实身份";
+        }
+        return [NSString stringWithFormat:@"FAIL: %@", [self str:r[@"error"] def:@"unknown"]];
+    } @catch (NSException *e) {
+        return @"FAIL";
+    }
 }
 
 + (NSString *)status {
-    __block NSString *r = @"timeout";
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [self runOnFridaThread:^{ r = [self probeSync]; dispatch_semaphore_signal(sem); }];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)));
-    return r;
+    @try {
+        NSDictionary *r = [self getJSON:@"/api/forge/status"];
+        if (![r[@"ok"] boolValue]) {
+            return [NSString stringWithFormat:@"FAIL: 连不上服务器\n%@", [self str:r[@"error"] def:@""]];
+        }
+        BOOL running = [r[@"running"] boolValue];
+        return [NSString stringWithFormat:@"state: %@\nutdid: %@\nserved: %@",
+                running ? @"running" : @"idle",
+                [self str:r[@"utdid"] def:@"-"],
+                r[@"served"] ?: @0];
+    } @catch (NSException *e) {
+        return @"FAIL: 异常";
+    }
+}
+
++ (NSString *)connectTest {
+    @try {
+        NSDictionary *r = [self getJSON:@"/api/forge/status"];
+        if (![r[@"ok"] boolValue]) {
+            return [NSString stringWithFormat:@"连不上 %@\n%@",
+                    kServer, [self str:r[@"error"] def:@"超时"]];
+        }
+        return [NSString stringWithFormat:@"服务器 OK\n%@", [self status]];
+    } @catch (NSException *e) {
+        return [NSString stringWithFormat:@"异常: %@", e.reason ?: e.name];
+    }
 }
 
 + (NSDictionary *)statusDict {
-    // 只读本地记录，不碰网络/frida，确保零异常
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    BOOL injected = [ud boolForKey:@"amapforge_injected"];
-    NSString *forged = [ud stringForKey:@"amapforge_utdid"];
-    if (!forged) forged = @"";
+    @try {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        BOOL localInjected = [ud boolForKey:@"amapforge_injected"];
+        NSString *localForged = [ud stringForKey:@"amapforge_utdid"];
 
-    NSMutableDictionary *d = [NSMutableDictionary dictionary];
-    [d setObject:@(injected) forKey:@"running"];
-    [d setObject:@(YES) forKey:@"ok"];
-    [d setObject:forged forKey:@"utdid"];
-    [d setObject:@"" forKey:@"proc"];
-    [d setObject:@"（点刷新状态做连通测试）" forKey:@"tcp"];
-    return d;
-}
+        NSDictionary *r = [self getJSON:@"/api/forge/status"];
+        BOOL reachable = [r[@"ok"] boolValue];
+        BOOL serverRunning = reachable && [r[@"running"] boolValue];
+        NSString *serverUtdid = [self str:r[@"utdid"] def:@""];
 
-+ (NSString *)shellOut:(NSString *)cmd timeoutSec:(int)timeoutSec {
-    int fds[2];
-    if (pipe(fds) != 0) return @"pipe 失败";
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO);
-    posix_spawn_file_actions_addclose(&actions, fds[0]);
-    posix_spawn_file_actions_addclose(&actions, fds[1]);
+        NSString *shown = serverUtdid.length ? serverUtdid
+                        : (localForged.length ? localForged : @"");
 
-    const char *bash = "/var/jb/usr/bin/bash";
-    // 关键：把 cmd 拷到 C 缓冲，避免 autorelease 导致悬空指针
-    size_t cmdLen = strlen([cmd UTF8String]) + 1;
-    char *cmdBuf = (char *)malloc(cmdLen);
-    if (!cmdBuf) { close(fds[0]); return @"内存不足"; }
-    memcpy(cmdBuf, [cmd UTF8String], cmdLen);
-    char *argv[] = {(char *)bash, (char *)"-lc", cmdBuf, NULL};
-    pid_t pid = 0;
-    int rc = posix_spawn(&pid, bash, &actions, NULL, argv, environ);
-    free(cmdBuf);
-    posix_spawn_file_actions_destroy(&actions);
-    close(fds[1]);
-    if (rc != 0) { close(fds[0]); return [NSString stringWithFormat:@"posix_spawn err=%d (%s)", rc, strerror(rc)]; }
-
-    fcntl(fds[0], F_SETFL, O_NONBLOCK);
-    NSMutableData *out = [NSMutableData data];
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeoutSec];
-    char buf[4096];
-    while ([deadline timeIntervalSinceNow] > 0) {
-        ssize_t n = read(fds[0], buf, sizeof(buf));
-        if (n > 0) { [out appendBytes:buf length:(NSUInteger)n]; }
-        else if (n == 0) { break; }
-        else { [NSThread sleepForTimeInterval:0.1]; }
+        NSMutableDictionary *d = [NSMutableDictionary dictionary];
+        [d setObject:@(reachable) forKey:@"ok"];
+        [d setObject:@(localInjected || serverRunning) forKey:@"running"];
+        [d setObject:shown forKey:@"utdid"];
+        [d setObject:(reachable ? @"服务器在线" : @"连不上服务器") forKey:@"tcp"];
+        return d;
+    } @catch (NSException *e) {
+        NSMutableDictionary *d = [NSMutableDictionary dictionary];
+        [d setObject:@NO forKey:@"ok"];
+        [d setObject:@NO forKey:@"running"];
+        [d setObject:@"" forKey:@"utdid"];
+        [d setObject:@"异常" forKey:@"tcp"];
+        return d;
     }
-    close(fds[0]);
-    int status = 0;
-    waitpid(pid, &status, WNOHANG);
-    NSString *s = [[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding];
-    return s ?: @"（无输出）";
 }
 
 + (NSString *)wipeData:(BOOL)deep {
     @try {
-    NSString *cmd = deep ? @"/var/jb/usr/bin/amap-wipe run --deep"
-                         : @"/var/jb/usr/bin/amap-wipe run";
-    if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/amap-wipe"]) {
-        return @"FAIL: 未安装 amap-wipe\n请先装 com.local.amappoi >= 1.2.2";
-    }
-    NSString *r = [self shellOut:cmd timeoutSec:120];
-    return r.length ? r : @"FAIL: 无输出";
+        NSMutableDictionary *b = [NSMutableDictionary dictionary];
+        [b setObject:@(deep) forKey:@"deep"];
+        NSDictionary *r = [self postJSON:@"/api/wipe" body:b timeout:150];
+        if ([r[@"ok"] boolValue]) {
+            return [NSString stringWithFormat:@"OK: 清理 %@ KB\n%@",
+                    r[@"kb"] ?: @0, [self str:r[@"detail"] def:@""]];
+        }
+        return [NSString stringWithFormat:@"FAIL: %@\n%@",
+                [self str:r[@"error"] def:@"unknown"],
+                [self str:r[@"detail"] def:@""]];
     } @catch (NSException *e) {
-        return [NSString stringWithFormat:@"FAIL: %@ %@", e.name, e.reason];
+        return [NSString stringWithFormat:@"FAIL: %@", e.reason ?: e.name];
     }
 }
 
 + (NSString *)dataSizeText {
     @try {
-        if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/amap-wipe"]) {
-            return @"FAIL: 未安装 amap-wipe";
+        NSDictionary *r = [self getJSON:@"/api/wipe/size"];
+        if ([r[@"ok"] boolValue]) {
+            return [NSString stringWithFormat:@"%@\n%@",
+                    [self str:r[@"human"] def:@"?"],
+                    [self str:r[@"path"] def:@""]];
         }
-        return [self shellOut:@"/var/jb/usr/bin/amap-wipe size" timeoutSec:90];
+        return [NSString stringWithFormat:@"FAIL: %@", [self str:r[@"error"] def:@"查询失败"]];
     } @catch (NSException *e) {
-        return [NSString stringWithFormat:@"FAIL: %@ %@", e.name, e.reason];
+        return @"FAIL";
     }
 }
 
 + (NSString *)dataSize {
-    NSString *r = [self dataSizeText];
-    NSRange hr = [r rangeOfString:@"'human': '"];
-    if (hr.location == NSNotFound) return r;
-    NSString *tail = [r substringFromIndex:hr.location + hr.length];
-    NSRange end = [tail rangeOfString:@"'"];
-    if (end.location == NSNotFound) return r;
-    return [NSString stringWithFormat:@"数据体积：%@",
-            [tail substringToIndex:end.location]];
+    @try {
+        NSDictionary *r = [self getJSON:@"/api/wipe/size"];
+        if ([r[@"ok"] boolValue]) {
+            return [NSString stringWithFormat:@"数据体积：%@", [self str:r[@"human"] def:@"?"]];
+        }
+        return [NSString stringWithFormat:@"查询失败：%@", [self str:r[@"error"] def:@"超时"]];
+    } @catch (NSException *e) {
+        return @"查询失败";
+    }
+}
+
++ (NSString *)currentForgedID {
+    return [[NSUserDefaults standardUserDefaults] stringForKey:@"amapforge_utdid"];
+}
+
++ (BOOL)isInjected {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"amapforge_injected"];
 }
 
 + (NSString *)randomID {
