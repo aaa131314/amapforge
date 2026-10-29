@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <netdb.h>
 #include <spawn.h>
 #include <sys/wait.h>
 
@@ -22,31 +23,49 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
 #pragma mark - socket 预检
 
 + (NSString *)tcpProbe:(NSString *)host port:(int)port timeoutMs:(int)ms {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return [NSString stringWithFormat:@"socket()失败 errno=%d", errno];
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    char portStr[16];
+    snprintf(portStr, sizeof(portStr), "%d", port);
+    int gai = getaddrinfo(host.UTF8String, portStr, &hints, &res);
+    if (gai != 0 || !res) {
+        return [NSString stringWithFormat:@"getaddrinfo 失败 gai=%d", gai];
+    }
+
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) {
+        freeaddrinfo(res);
+        return [NSString stringWithFormat:@"socket() 失败 errno=%d", errno];
+    }
+
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-    addr.sin_addr.s_addr = inet_addr(host.UTF8String);
-    int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+
+    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+
     if (rc < 0 && errno != EINPROGRESS) {
         int e = errno; close(fd);
-        return [NSString stringWithFormat:@"connect失败 errno=%d (%s)", e, strerror(e)];
+        return [NSString stringWithFormat:@"connect 立即失败 errno=%d (%s)", e, strerror(e)];
     }
+    if (rc == 0) { close(fd); return [NSString stringWithFormat:@"TCP OK %@:%d（直连成功）", host, port]; }
+
     fd_set wfds; FD_ZERO(&wfds); FD_SET(fd, &wfds);
     struct timeval tv;
     tv.tv_sec = ms / 1000;
     tv.tv_usec = (ms % 1000) * 1000;
     rc = select(fd + 1, NULL, &wfds, NULL, &tv);
-    if (rc == 0) { close(fd); return [NSString stringWithFormat:@"connect超时%dms", ms]; }
-    if (rc < 0) { int e = errno; close(fd); return [NSString stringWithFormat:@"select失败 errno=%d", e]; }
-    int soerr = 0; socklen_t len = sizeof(soerr);
-    getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len);
+    if (rc == 0) { close(fd); return [NSString stringWithFormat:@"connect 超时 %dms", ms]; }
+    if (rc < 0) { int e = errno; close(fd); return [NSString stringWithFormat:@"select 失败 errno=%d", e]; }
+
+    int soerr = 0; socklen_t slen = sizeof(soerr);
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
     close(fd);
-    if (soerr != 0) return [NSString stringWithFormat:@"SO_ERROR=%d (%s)", soerr, strerror(soerr)];
+    if (soerr != 0) {
+        return [NSString stringWithFormat:@"SO_ERROR=%d (%s)", soerr, strerror(soerr)];
+    }
     return [NSString stringWithFormat:@"TCP OK %@:%d", host, port];
 }
 
@@ -283,8 +302,8 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
     return @{@"ok": @(ok),
              @"running": @(injected),
              @"utdid": forged ?: @"",
-             @"proc": proc,
-             @"tcp": tcp};
+             @"proc": proc ?: @"",
+             @"tcp": tcp ?: @""};
     } @catch (NSException *e) {
         return @{@"ok": @NO, @"running": @NO, @"utdid": @"",
                  @"proc": @"", @"tcp": [NSString stringWithFormat:@"异常: %@", e.name]};
