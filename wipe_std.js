@@ -1,3 +1,20 @@
+const AMAP_WIPE_OUT = '/tmp/amap_wipe_result.json';
+
+function amapWriteOut(obj) {
+    try {
+        var fd = new NativeFunction(Module.getGlobalExportByName('open'), 'int', ['pointer','int','int']);
+        var wr = new NativeFunction(Module.getGlobalExportByName('write'), 'long', ['int','pointer','ulong']);
+        var cl = new NativeFunction(Module.getGlobalExportByName('close'), 'int', ['int']);
+        var js = JSON.stringify(obj);
+        var f = fd(Memory.allocUtf8String(AMAP_WIPE_OUT), 0x241, 420);
+        if (f >= 0) {
+            var b = Memory.allocUtf8String(js);
+            wr(f, b, js.length);
+            cl(f);
+        }
+    } catch (e) {}
+}
+
 const ACTION = 'std';
 /* wipe_data.js - 删除高德数据（通过 SpringBoard 的 root 权限）
  *
@@ -129,6 +146,7 @@ function doWipe(deep) {
     var D = findContainer();
     if (!D) {
         out.detail = 'container not found';
+        amapWriteOut({ kind: 'wipe_result', ok: false, kb: 0, detail: out.detail });
         send({ kind: 'wipe_result', ok: false, kb: 0, detail: out.detail });
         return;
     }
@@ -155,16 +173,18 @@ function doWipe(deep) {
     lines.push('cleaned: ' + totalKb + 'KB');
     lines.push('next launch regenerates diu / adiu / caches');
 
+    amapWriteOut({ kind: 'wipe_result', ok: true, kb: totalKb, detail: lines.join('\n') });
     send({ kind: 'wipe_result', ok: true, kb: totalKb, detail: lines.join('\n') });
 }
 
 function doSize() {
     var D = findContainer();
-    if (!D) { send({ kind: 'size_result', ok: false }); return; }
+    if (!D) { amapWriteOut({kind:'size_result', ok:false}); send({ kind: 'size_result', ok: false }); return; }
     var bytes = sizeofDir(D, 7);
     var mb = bytes / 1024 / 1024;
-    send({ kind: 'size_result', ok: true, path: D,
-           human: (mb >= 1 ? mb.toFixed(1) + ' MB' : Math.round(bytes / 1024) + ' KB') });
+    var _o = { kind: 'size_result', ok: true, path: D, human: (mb >= 1 ? mb.toFixed(1) + ' MB' : Math.round(bytes / 1024) + ' KB') };
+    amapWriteOut(_o);
+    send(_o);
 }
 
 // 挂上 ntfy 消息处理
