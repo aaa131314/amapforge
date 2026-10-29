@@ -12,6 +12,7 @@
 @property (nonatomic, strong) UIButton *sizeBtn;
 @property (nonatomic, strong) UIButton *stopBtn;
 @property (nonatomic, strong) UITextView *logView;
+@property (nonatomic, strong) UILabel *serverLabel;
 @property (nonatomic, assign) BOOL busy;
 @end
 
@@ -24,7 +25,9 @@
     [self buildUI];
     // 启动时不做任何 frida 调用（同步 API 可能长时间阻塞）
     // 用户点「刷新状态」才连 frida-server
-    self.logView.text = @"就绪。点「刷新状态」检查 frida-server。";
+    self.logView.text = [NSString stringWithFormat:
+        @"就绪\n服务器：%@\n\n点「刷新状态」测试连通\n长按顶部状态文字可修改服务器地址",
+        [ForgeRunner serverAddr]];
 }
 
 - (UILabel *)smallLabel:(NSString *)t {
@@ -63,6 +66,10 @@
     self.statusLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold];
     self.statusLabel.textColor = [UIColor whiteColor];
     self.statusLabel.text = @"读取中…";
+    self.statusLabel.userInteractionEnabled = YES;
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+                                   initWithTarget:self action:@selector(onConfigServer)];
+    [self.statusLabel addGestureRecognizer:tap];
     [card addSubview:self.statusLabel];
 
     UILabel *t2 = [self smallLabel:@"设备 ID (UTDID)"];
@@ -196,6 +203,40 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         self.logView.text = s ?: @"";
     });
+}
+
+
+- (void)onConfigServer {
+    NSString *cur = [ForgeRunner serverAddr];
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"服务器地址"
+                         message:[NSString stringWithFormat:@"当前：\n%@\n\nCloudflare 隧道重启后 URL 会变，在这里更新。", cur]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = cur;
+        tf.placeholder = @"https://xxx.trycloudflare.com";
+        tf.keyboardType = UIKeyboardTypeURL;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault
+                                       handler:^(UIAlertAction *x) {
+        NSString *v = a.textFields.firstObject.text;
+        v = [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!v.length) return;
+        if (![v hasSuffix:@"/"]) {
+            // 去掉末尾斜杠
+        } else {
+            v = [v substringToIndex:v.length - 1];
+        }
+        if ([ForgeRunner setServerAddr:v]) {
+            self.logView.text = [NSString stringWithFormat:@"服务器已更新：\n%@\n\n点「刷新状态」测试", v];
+        } else {
+            self.logView.text = @"地址无效，需要 http:// 或 https:// 开头";
+        }
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 - (void)onRefresh {
