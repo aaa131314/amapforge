@@ -34,6 +34,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 保存伪装参数
 + (void)setSpoofConfig:(NSDictionary *)cfg;
 
+/// 提交一条新增地点
++ (NSDictionary *)submitPOI:(NSDictionary *)poi;
+
+/// 批量提交
++ (NSDictionary *)submitBatch:(NSArray *)items;
+
 /// 当前服务器地址
 + (NSString *)serverAddr;
 
