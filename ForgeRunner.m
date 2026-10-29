@@ -242,6 +242,18 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
     return s;
 }
 
+
+/// 连通测试（TCP + frida），返回字符串结果
++ (NSString *)connectTest {
+    @try {
+        NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:3000];
+        if (![tcp hasPrefix:@"TCP OK"]) return tcp;
+        return [NSString stringWithFormat:@"%@ | %@", tcp, [self probeSync]];
+    } @catch (NSException *e) {
+        return [NSString stringWithFormat:@"异常: %@ / %@", e.name, e.reason];
+    }
+}
+
 #pragma mark - public
 
 + (NSString *)startWithID:(NSString *)utdid {
@@ -269,45 +281,19 @@ static NSString *const kRemoteAddr = @"127.0.0.1:27042";
 }
 
 + (NSDictionary *)statusDict {
-    @try {
-    // 1) 注入标记（本地记录，不依赖高德进程）
-    BOOL injected = [self isInjected];
-    NSString *forged = [self currentForgedID];
+    // 只读本地记录，不碰网络/frida，确保零异常
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    BOOL injected = [ud boolForKey:@"amapforge_injected"];
+    NSString *forged = [ud stringForKey:@"amapforge_utdid"];
+    if (!forged) forged = @"";
 
-    // 2) frida 连通性（轻量）
-    NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:2000];
-    BOOL ok = [tcp hasPrefix:@"TCP OK"];
-
-    // 3) 高德进程状态（附带的）
-    NSString *proc = @"";
-    if (ok) {
-        GError *err = NULL;
-        FridaDeviceManager *mgr = frida_device_manager_new();
-        FridaDevice *dev = frida_device_manager_add_remote_device_sync(
-            mgr, kRemoteAddr.UTF8String, NULL, NULL, &err);
-        if (dev) {
-            FridaProcess *p = frida_device_get_process_by_name_sync(
-                dev, kAppBundle.UTF8String, NULL, NULL, NULL);
-            if (p) {
-                proc = [NSString stringWithFormat:@"pid %u", frida_process_get_pid(p)];
-                g_object_unref(p);
-            }
-            g_object_unref(dev);
-        } else if (err) {
-            g_error_free(err);
-        }
-        g_object_unref(mgr);
-    }
-
-    return @{@"ok": @(ok),
-             @"running": @(injected),
-             @"utdid": forged ?: @"",
-             @"proc": proc ?: @"",
-             @"tcp": tcp ?: @""};
-    } @catch (NSException *e) {
-        return @{@"ok": @NO, @"running": @NO, @"utdid": @"",
-                 @"proc": @"", @"tcp": [NSString stringWithFormat:@"异常: %@", e.name]};
-    }
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    [d setObject:@(injected) forKey:@"running"];
+    [d setObject:@(YES) forKey:@"ok"];
+    [d setObject:forged forKey:@"utdid"];
+    [d setObject:@"" forKey:@"proc"];
+    [d setObject:@"（点刷新状态做连通测试）" forKey:@"tcp"];
+    return d;
 }
 
 + (NSString *)shellOut:(NSString *)cmd timeoutSec:(int)timeoutSec {
