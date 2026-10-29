@@ -37,6 +37,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 已服务次数
 + (NSInteger)servedCount;
 
+/// 已伪造的 UTDID
++ (nullable NSString *)currentForgedID;
+
+/// 是否处于注入状态
++ (BOOL)isInjected;
+
 @end
 
 NS_ASSUME_NONNULL_END
