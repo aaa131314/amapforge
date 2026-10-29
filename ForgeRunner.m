@@ -1,7 +1,7 @@
 #import "ForgeRunner.h"
 
 // 服务器地址：优先读 NSUserDefaults，没有就用默认值
-static NSString *const kDefaultServer = @"https://guide-juan-collector-calls.trycloudflare.com";
+static NSString *const kDefaultServer = @"https://euphemism-rentable-defendant.ngrok-free.dev";
 
 static NSString *serverURL(void) {
     NSString *s = [[NSUserDefaults standardUserDefaults] stringForKey:@"amapforge_server"];
@@ -51,6 +51,7 @@ static NSURLSession *_sharedSession(void) {
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
         req.HTTPMethod = @"POST";
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+        [req setValue:@"1" forHTTPHeaderField:@"ngrok-skip-browser-warning"];
         req.timeoutInterval = t;
 
         NSError *err = nil;
@@ -88,6 +89,7 @@ static NSURLSession *_sharedSession(void) {
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
         req.HTTPMethod = @"GET";
         req.timeoutInterval = 30;
+        [req setValue:@"1" forHTTPHeaderField:@"ngrok-skip-browser-warning"];
 
         __block NSData *respData = nil;
         __block NSError *respErr = nil;
