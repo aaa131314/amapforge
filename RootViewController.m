@@ -154,7 +154,7 @@
 }
 
 - (void)setBusy:(BOOL)b {
-    self.busy = b;
+    _busy = b;   // 必须写 ivar；self.busy = b 会递归调用本方法导致栈溢出
     self.forgeBtn.enabled = !b;
     self.wipeBtn.enabled = !b;
     self.deepWipeBtn.enabled = !b;
