@@ -176,6 +176,18 @@ static void on_script_message(FridaScript *script, const gchar *message,
             canReach ? @"是" : @"否", procName, pid];
 }
 
+
+/// 已伪造的 UTDID（从 NSUserDefaults 读）
++ (NSString *)currentForgedID {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    return [ud stringForKey:@"amapforge_utdid"];
+}
+
+/// 是否处于注入状态
++ (BOOL)isInjected {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"amapforge_injected"];
+}
+
 #pragma mark - 注入 UTDID
 
 + (NSString *)injectSync {
@@ -249,7 +261,18 @@ static void on_script_message(FridaScript *script, const gchar *message,
     g_object_unref(script); g_object_unref(opts); g_object_unref(session);
     g_object_unref(dev); g_object_unref(mgr);
 
-    return [NSString stringWithFormat:@"OK: 已注入 %@ (pid %u)\n设备 ID 已替换", kAppBundle, pid];
+    // 记录注入状态（供状态显示用，不依赖高德进程是否存活）
+    NSString *forged = [self currentForgedID];
+    if (!forged) {
+        forged = [self randomID];
+    }
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setBool:YES forKey:@"amapforge_injected"];
+    [ud setObject:forged forKey:@"amapforge_utdid"];
+    [ud setObject:[NSDate date] forKey:@"amapforge_inject_time"];
+    [ud synchronize];
+
+    return [NSString stringWithFormat:@"OK: 已注入 %@ (pid %u)\n设备 ID: %@", kAppBundle, pid, forged];
 }
 
 + (NSString *)detachSync {
@@ -269,6 +292,10 @@ static void on_script_message(FridaScript *script, const gchar *message,
         if (err) { g_error_free(err); err = NULL; }
         g_object_unref(p);
         g_object_unref(dev); g_object_unref(mgr);
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        [ud setBool:NO forKey:@"amapforge_injected"];
+        [ud removeObjectForKey:@"amapforge_utdid"];
+        [ud synchronize];
         return @"OK: 高德已停止，恢复真实身份";
     }
     g_object_unref(dev); g_object_unref(mgr);
@@ -328,11 +355,40 @@ static void on_script_message(FridaScript *script, const gchar *message,
 }
 
 + (NSDictionary *)statusDict {
-    NSString *s = [self status];
-    BOOL ok = ![s hasPrefix:@"FAIL"];
-    BOOL running = [s containsString:@"running"];
-    return @{@"ok": @(ok), @"running": @(running),
-             @"utdid": running ? s : @"", @"served": @0};
+    // 1) 注入标记（本地记录，不依赖高德进程）
+    BOOL injected = [self isInjected];
+    NSString *forged = [self currentForgedID];
+
+    // 2) frida 连通性（轻量）
+    NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:2000];
+    BOOL ok = [tcp hasPrefix:@"TCP OK"];
+
+    // 3) 高德进程状态（附带的）
+    NSString *proc = @"";
+    if (ok) {
+        GError *err = NULL;
+        FridaDeviceManager *mgr = frida_device_manager_new();
+        FridaDevice *dev = frida_device_manager_add_remote_device_sync(
+            mgr, kRemoteAddr.UTF8String, NULL, NULL, &err);
+        if (dev) {
+            FridaProcess *p = frida_device_get_process_by_name_sync(
+                dev, kAppBundle.UTF8String, NULL, NULL, NULL);
+            if (p) {
+                proc = [NSString stringWithFormat:@"pid %u", frida_process_get_pid(p)];
+                g_object_unref(p);
+            }
+            g_object_unref(dev);
+        } else if (err) {
+            g_error_free(err);
+        }
+        g_object_unref(mgr);
+    }
+
+    return @{@"ok": @(ok),
+             @"running": @(injected),
+             @"utdid": forged ?: @"",
+             @"proc": proc,
+             @"tcp": tcp};
 }
 
 + (NSString *)wipeData:(BOOL)deep {
