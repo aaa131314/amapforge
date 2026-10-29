@@ -25,6 +25,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 数据体积（原始输出）
 + (NSString *)dataSizeText;
 
+/// 连通测试（TCP + frida）
++ (NSString *)connectTest;
+
 /// 生成随机 22 位 ID
 + (NSString *)randomID;
 
