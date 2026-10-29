@@ -8,28 +8,15 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <spawn.h>
+#include <sys/wait.h>
+
+extern char **environ;
 
 static NSString *const kAppBundle = @"com.autonavi.amap";
 static NSString *const kRemoteAddr = @"127.0.0.1:27042";
 
 // ---- GLib 主循环（收 send() 消息）----
-static NSMutableString *gCurrentBuf = nil;
-static NSString *gCurrentWaitFor = nil;
-static BOOL *gCurrentDone = NULL;
-
-static void on_script_message(FridaScript *script, const gchar *message,
-                              GBytes *data, gpointer user_data) {
-    if (!message) return;
-    @autoreleasepool {
-        NSString *m = [NSString stringWithUTF8String:message];
-        if (gCurrentBuf && m) [gCurrentBuf appendString:m];
-        if (gCurrentWaitFor && gCurrentBuf &&
-            [gCurrentBuf containsString:gCurrentWaitFor] && gCurrentDone) {
-            *gCurrentDone = YES;
-        }
-    }
-}
-
 @implementation ForgeRunner
 
 #pragma mark - socket 预检
@@ -86,120 +73,6 @@ static void on_script_message(FridaScript *script, const gchar *message,
     NSString *s = [NSString stringWithFormat:@"%s", e->message];
     g_error_free(e);
     return s;
-}
-
-+ (NSString *)execScript:(NSString *)jsName
-               onProcess:(NSString *)procName
-                 waitFor:(NSString *)waitFor
-              timeoutSec:(int)timeoutSec {
-    NSString *js = [self jsSourceNamed:jsName];
-    if (!js) return [NSString stringWithFormat:@"FAIL: 缺少 %@.js", jsName];
-
-    NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:3000];
-    if (![tcp hasPrefix:@"TCP OK"]) return [NSString stringWithFormat:@"FAIL: 端口不通\n%@", tcp];
-
-    // 关键：为本次调用创建私有的 GMainContext 并推为线程默认
-    GMainContext *ctx = g_main_context_new();
-    g_main_context_push_thread_default(ctx);
-
-    __block NSMutableString *buf = [NSMutableString string];
-    __block BOOL done = NO;
-
-    GError *err = NULL;
-    FridaDeviceManager *mgr = frida_device_manager_new();
-    FridaDevice *dev = frida_device_manager_add_remote_device_sync(
-        mgr, kRemoteAddr.UTF8String, NULL, NULL, &err);
-    if (!dev) {
-        NSString *e = [self errStr:err];
-        g_object_unref(mgr);
-        g_main_context_pop_thread_default(ctx);
-        g_main_context_unref(ctx);
-        return [NSString stringWithFormat:@"FAIL: frida 连接失败\n%@", e];
-    }
-
-    FridaProcess *proc = frida_device_get_process_by_name_sync(
-        dev, procName.UTF8String, NULL, NULL, &err);
-    if (!proc) {
-        NSString *e = [self errStr:err];
-        g_object_unref(dev); g_object_unref(mgr);
-        g_main_context_pop_thread_default(ctx);
-        g_main_context_unref(ctx);
-        return [NSString stringWithFormat:@"FAIL: 进程 %@ 未运行\n%@", procName, e];
-    }
-    guint pid = frida_process_get_pid(proc);
-    g_object_unref(proc);
-
-    FridaSession *session = frida_device_attach_sync(dev, pid, NULL, NULL, &err);
-    if (!session) {
-        NSString *e = [self errStr:err];
-        g_object_unref(dev); g_object_unref(mgr);
-        g_main_context_pop_thread_default(ctx);
-        g_main_context_unref(ctx);
-        return [NSString stringWithFormat:@"FAIL: attach %@ 失败 (pid %u)\n%@", procName, pid, e];
-    }
-
-    FridaScriptOptions *opts = frida_script_options_new();
-    frida_script_options_set_name(opts, jsName.UTF8String);
-    frida_script_options_set_runtime(opts, FRIDA_SCRIPT_RUNTIME_QJS);
-
-    FridaScript *script = frida_session_create_script_sync(
-        session, js.UTF8String, opts, NULL, &err);
-    if (!script) {
-        NSString *e = [self errStr:err];
-        g_object_unref(opts); g_object_unref(session);
-        g_object_unref(dev); g_object_unref(mgr);
-        g_main_context_pop_thread_default(ctx);
-        g_main_context_unref(ctx);
-        return [NSString stringWithFormat:@"FAIL: 创建脚本失败\n%@", e];
-    }
-
-    // 消息回调（用 block 捕获 buf）
-    void (^onMsg)(const gchar *) = ^(const gchar *message) {
-        if (!message) return;
-        NSString *m = [NSString stringWithUTF8String:message];
-        if (m) [buf appendString:m];
-        if ([buf containsString:waitFor]) done = YES;
-    };
-    __block void (^savedBlock)(const gchar *) = onMsg;
-
-    // 用 libffi 风格的回调不方便，改用 C 函数 + 全局指针
-    gCurrentBuf = buf;
-    gCurrentWaitFor = waitFor;
-    gCurrentDone = &done;
-    g_signal_connect(script, "message", G_CALLBACK(on_script_message), NULL);
-
-    frida_script_load_sync(script, NULL, &err);
-    if (err) {
-        NSString *e = [self errStr:err];
-        gCurrentBuf = nil; gCurrentWaitFor = nil; gCurrentDone = NULL;
-        g_object_unref(script); g_object_unref(opts); g_object_unref(session);
-        g_object_unref(dev); g_object_unref(mgr);
-        g_main_context_pop_thread_default(ctx);
-        g_main_context_unref(ctx);
-        return [NSString stringWithFormat:@"FAIL: 加载脚本失败\n%@", e];
-    }
-
-    // 手动 pump 这个私有 context，直到出结果或超时
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeoutSec];
-    while (!done && [deadline timeIntervalSinceNow] > 0) {
-        @autoreleasepool {
-            while (g_main_context_iteration(ctx, FALSE)) { }
-            [NSThread sleepForTimeInterval:0.1];
-        }
-    }
-
-    gCurrentBuf = nil; gCurrentWaitFor = nil; gCurrentDone = NULL;
-
-    NSString *result = [buf copy];
-
-    g_object_unref(script); g_object_unref(opts); g_object_unref(session);
-    g_object_unref(dev); g_object_unref(mgr);
-
-    g_main_context_pop_thread_default(ctx);
-    g_main_context_unref(ctx);
-
-    if (result.length) return result;
-    return [NSString stringWithFormat:@"FAIL: 脚本无输出（pid %u，%.0fs 超时）", pid, (double)timeoutSec];
 }
 
 #pragma mark - 注入 UTDID
@@ -405,29 +278,56 @@ static void on_script_message(FridaScript *script, const gchar *message,
              @"tcp": tcp};
 }
 
++ (NSString *)shellOut:(NSString *)cmd timeoutSec:(int)timeoutSec {
+    int fds[2];
+    if (pipe(fds) != 0) return @"pipe 失败";
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, fds[0]);
+    posix_spawn_file_actions_addclose(&actions, fds[1]);
+
+    const char *bash = "/var/jb/usr/bin/bash";
+    char *argv[] = {(char *)bash, (char *)"-lc", (char *)[cmd UTF8String], NULL};
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, bash, &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(fds[1]);
+    if (rc != 0) { close(fds[0]); return [NSString stringWithFormat:@"posix_spawn err=%d (%s)", rc, strerror(rc)]; }
+
+    fcntl(fds[0], F_SETFL, O_NONBLOCK);
+    NSMutableData *out = [NSMutableData data];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeoutSec];
+    char buf[4096];
+    while ([deadline timeIntervalSinceNow] > 0) {
+        ssize_t n = read(fds[0], buf, sizeof(buf));
+        if (n > 0) { [out appendBytes:buf length:(NSUInteger)n]; }
+        else if (n == 0) { break; }
+        else { [NSThread sleepForTimeInterval:0.1]; }
+    }
+    close(fds[0]);
+    int status = 0;
+    waitpid(pid, &status, WNOHANG);
+    NSString *s = [[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding];
+    return s ?: @"（无输出）";
+}
+
 + (NSString *)wipeData:(BOOL)deep {
-    __block NSString *r = @"timeout";
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    NSString *js = deep ? @"wipe_deep" : @"wipe_std";
-    [self runOnFridaThread:^{
-        r = [self execScript:js onProcess:@"SpringBoard"
-                     waitFor:@"wipe_result" timeoutSec:90];
-        dispatch_semaphore_signal(sem);
-    }];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(100 * NSEC_PER_SEC)));
-    return r;
+    NSString *cmd = deep ? @"/var/jb/usr/bin/amap-wipe run --deep"
+                         : @"/var/jb/usr/bin/amap-wipe run";
+    if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/amap-wipe"]) {
+        return @"FAIL: 未安装 amap-wipe\n请先装 com.local.amappoi >= 1.2.2";
+    }
+    NSString *r = [self shellOut:cmd timeoutSec:120];
+    return r.length ? r : @"FAIL: 无输出";
 }
 
 + (NSString *)dataSizeText {
-    __block NSString *r = @"timeout";
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [self runOnFridaThread:^{
-        r = [self execScript:@"wipe_size" onProcess:@"SpringBoard"
-                     waitFor:@"size_result" timeoutSec:60];
-        dispatch_semaphore_signal(sem);
-    }];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(70 * NSEC_PER_SEC)));
-    return r;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/amap-wipe"]) {
+        return @"FAIL: 未安装 amap-wipe";
+    }
+    return [self shellOut:@"/var/jb/usr/bin/amap-wipe size" timeoutSec:90];
 }
 
 + (NSString *)dataSize {
