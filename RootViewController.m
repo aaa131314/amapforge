@@ -107,6 +107,12 @@
     self.forgeBtn = [self btn:@"① 换一个新设备身份" color:[UIColor colorWithRed:0.18 green:0.51 blue:0.97 alpha:1.0] h:46];
     self.forgeBtn.frame = CGRectMake(14, y + 10, w, 46);
     [self.forgeBtn addTarget:self action:@selector(onForge) forControlEvents:UIControlEventTouchUpInside];
+    {
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+                                            initWithTarget:self action:@selector(onSpoofConfig)];
+        lp.minimumPressDuration = 0.6;
+        [self.forgeBtn addGestureRecognizer:lp];
+    }
     [self.view addSubview:self.forgeBtn];
 
     self.wipeBtn = [self btn:@"② 清理数据（身份+缓存+登录）" color:[UIColor colorWithRed:0.72 green:0.45 blue:0.10 alpha:1.0] h:40];
@@ -237,6 +243,65 @@
         }
     }]];
     [self presentViewController:a animated:YES completion:nil];
+}
+
+
+- (void)onSpoofConfig {
+    NSDictionary *cur = [ForgeRunner spoofConfig];
+    NSString *msg = [NSString stringWithFormat:
+        @"机型: %@\niOS: %@\n纬度: %@\n经度: %@\n行政区: %@\n\n"
+        @"输入城市名快速切换位置：\n北京 上海 广州 深圳 成都 杭州 武汉 西安 重庆 南京",
+        cur[@"model"], cur[@"ios"], cur[@"lat"], cur[@"lng"], cur[@"adcode"]];
+
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"伪装参数"
+                         message:msg
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"城市名（留空保持不变）";
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"应用" style:UIAlertActionStyleDefault
+                                       handler:^(UIAlertAction *x) {
+        NSString *v = a.textFields.firstObject.text ?: @"";
+        v = [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        [self applyCity:v];
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)applyCity:(NSString *)name {
+    if (name.length == 0) {
+        self.logView.text = @"未输入城市，保持当前配置";
+        return;
+    }
+    NSDictionary *cities = @{
+        @"北京": @[@"39.9042", @"116.4074", @"110000"],
+        @"上海": @[@"31.2304", @"121.4737", @"310000"],
+        @"广州": @[@"23.1291", @"113.2644", @"440100"],
+        @"深圳": @[@"22.5431", @"114.0579", @"440300"],
+        @"成都": @[@"30.5728", @"104.0668", @"510100"],
+        @"杭州": @[@"30.2741", @"120.1551", @"330100"],
+        @"武汉": @[@"30.5928", @"114.3055", @"420100"],
+        @"西安": @[@"34.3416", @"108.9398", @"610100"],
+        @"重庆": @[@"29.5630", @"106.5516", @"500000"],
+        @"南京": @[@"32.0603", @"118.7969", @"320100"]
+    };
+    NSArray *c = cities[name];
+    if (!c) {
+        self.logView.text = [NSString stringWithFormat:@"未知城市: %@", name];
+        return;
+    }
+    NSMutableDictionary *cfg = [[ForgeRunner spoofConfig] mutableCopy];
+    cfg[@"lat"] = @([c[0] doubleValue]);
+    cfg[@"lng"] = @([c[1] doubleValue]);
+    cfg[@"adcode"] = c[2];
+    [ForgeRunner setSpoofConfig:cfg];
+
+    self.logView.text = [NSString stringWithFormat:
+        @"已设置伪装位置\n城市: %@\n坐标: %@, %@\n行政区: %@\n\n下次换身份生效",
+        name, c[0], c[1], c[2]];
 }
 
 - (void)onRefresh {
