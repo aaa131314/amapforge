@@ -13,18 +13,19 @@ static NSString *const kAppBundle = @"com.autonavi.amap";
 static NSString *const kRemoteAddr = @"127.0.0.1:27042";
 
 // ---- GLib 主循环（收 send() 消息）----
-static GMainLoop *gLoop = NULL;
-static NSMutableString *gBuf = nil;
-static NSString *gWaitFor = nil;
+static NSMutableString *gCurrentBuf = nil;
+static NSString *gCurrentWaitFor = nil;
+static BOOL *gCurrentDone = NULL;
 
 static void on_script_message(FridaScript *script, const gchar *message,
                               GBytes *data, gpointer user_data) {
     if (!message) return;
     @autoreleasepool {
         NSString *m = [NSString stringWithUTF8String:message];
-        if (gBuf && m) [gBuf appendString:m];
-        if (gWaitFor && gBuf && [gBuf containsString:gWaitFor]) {
-            if (gLoop && g_main_loop_is_running(gLoop)) g_main_loop_quit(gLoop);
+        if (gCurrentBuf && m) [gCurrentBuf appendString:m];
+        if (gCurrentWaitFor && gCurrentBuf &&
+            [gCurrentBuf containsString:gCurrentWaitFor] && gCurrentDone) {
+            *gCurrentDone = YES;
         }
     }
 }
@@ -97,10 +98,12 @@ static void on_script_message(FridaScript *script, const gchar *message,
     NSString *tcp = [self tcpProbe:@"127.0.0.1" port:27042 timeoutMs:3000];
     if (![tcp hasPrefix:@"TCP OK"]) return [NSString stringWithFormat:@"FAIL: 端口不通\n%@", tcp];
 
-    const char *outPath = "/tmp/amap_wipe_result.json";
-    // 先删旧结果
-    [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/amap_wipe_result.json" error:nil];
-    unlink(outPath);
+    // 关键：为本次调用创建私有的 GMainContext 并推为线程默认
+    GMainContext *ctx = g_main_context_new();
+    g_main_context_push_thread_default(ctx);
+
+    __block NSMutableString *buf = [NSMutableString string];
+    __block BOOL done = NO;
 
     GError *err = NULL;
     FridaDeviceManager *mgr = frida_device_manager_new();
@@ -109,6 +112,8 @@ static void on_script_message(FridaScript *script, const gchar *message,
     if (!dev) {
         NSString *e = [self errStr:err];
         g_object_unref(mgr);
+        g_main_context_pop_thread_default(ctx);
+        g_main_context_unref(ctx);
         return [NSString stringWithFormat:@"FAIL: frida 连接失败\n%@", e];
     }
 
@@ -117,6 +122,8 @@ static void on_script_message(FridaScript *script, const gchar *message,
     if (!proc) {
         NSString *e = [self errStr:err];
         g_object_unref(dev); g_object_unref(mgr);
+        g_main_context_pop_thread_default(ctx);
+        g_main_context_unref(ctx);
         return [NSString stringWithFormat:@"FAIL: 进程 %@ 未运行\n%@", procName, e];
     }
     guint pid = frida_process_get_pid(proc);
@@ -126,6 +133,8 @@ static void on_script_message(FridaScript *script, const gchar *message,
     if (!session) {
         NSString *e = [self errStr:err];
         g_object_unref(dev); g_object_unref(mgr);
+        g_main_context_pop_thread_default(ctx);
+        g_main_context_unref(ctx);
         return [NSString stringWithFormat:@"FAIL: attach %@ 失败 (pid %u)\n%@", procName, pid, e];
     }
 
@@ -139,53 +148,58 @@ static void on_script_message(FridaScript *script, const gchar *message,
         NSString *e = [self errStr:err];
         g_object_unref(opts); g_object_unref(session);
         g_object_unref(dev); g_object_unref(mgr);
+        g_main_context_pop_thread_default(ctx);
+        g_main_context_unref(ctx);
         return [NSString stringWithFormat:@"FAIL: 创建脚本失败\n%@", e];
     }
+
+    // 消息回调（用 block 捕获 buf）
+    void (^onMsg)(const gchar *) = ^(const gchar *message) {
+        if (!message) return;
+        NSString *m = [NSString stringWithUTF8String:message];
+        if (m) [buf appendString:m];
+        if ([buf containsString:waitFor]) done = YES;
+    };
+    __block void (^savedBlock)(const gchar *) = onMsg;
+
+    // 用 libffi 风格的回调不方便，改用 C 函数 + 全局指针
+    gCurrentBuf = buf;
+    gCurrentWaitFor = waitFor;
+    gCurrentDone = &done;
+    g_signal_connect(script, "message", G_CALLBACK(on_script_message), NULL);
 
     frida_script_load_sync(script, NULL, &err);
     if (err) {
         NSString *e = [self errStr:err];
+        gCurrentBuf = nil; gCurrentWaitFor = nil; gCurrentDone = NULL;
         g_object_unref(script); g_object_unref(opts); g_object_unref(session);
         g_object_unref(dev); g_object_unref(mgr);
+        g_main_context_pop_thread_default(ctx);
+        g_main_context_unref(ctx);
         return [NSString stringWithFormat:@"FAIL: 加载脚本失败\n%@", e];
     }
 
-    // 轮询等结果文件出现
-    NSString *result = nil;
-    for (int i = 0; i < timeoutSec * 4; i++) {
-        [NSThread sleepForTimeInterval:0.25];
-        NSData *d = [NSData dataWithContentsOfFile:@"/tmp/amap_wipe_result.json"];
-        if (d && d.length > 4) {
-            NSString *t = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-            if (t && [t containsString:waitFor]) {
-                result = t;
-                break;
-            }
+    // 手动 pump 这个私有 context，直到出结果或超时
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeoutSec];
+    while (!done && [deadline timeIntervalSinceNow] > 0) {
+        @autoreleasepool {
+            while (g_main_context_iteration(ctx, FALSE)) { }
+            [NSThread sleepForTimeInterval:0.1];
         }
     }
+
+    gCurrentBuf = nil; gCurrentWaitFor = nil; gCurrentDone = NULL;
+
+    NSString *result = [buf copy];
 
     g_object_unref(script); g_object_unref(opts); g_object_unref(session);
     g_object_unref(dev); g_object_unref(mgr);
 
-    if (result) return result;
+    g_main_context_pop_thread_default(ctx);
+    g_main_context_unref(ctx);
 
-    // 读不到文件 —— 检查是否沙箱拦
-    BOOL canReach = [[NSFileManager defaultManager] fileExistsAtPath:@"/tmp"];
-    return [NSString stringWithFormat:
-            @"FAIL: 脚本无输出\n/tmp 可达: %@\n进程: %@ (pid %u)\n尝试读: /tmp/amap_wipe_result.json",
-            canReach ? @"是" : @"否", procName, pid];
-}
-
-
-/// 已伪造的 UTDID（从 NSUserDefaults 读）
-+ (NSString *)currentForgedID {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    return [ud stringForKey:@"amapforge_utdid"];
-}
-
-/// 是否处于注入状态
-+ (BOOL)isInjected {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:@"amapforge_injected"];
+    if (result.length) return result;
+    return [NSString stringWithFormat:@"FAIL: 脚本无输出（pid %u，%.0fs 超时）", pid, (double)timeoutSec];
 }
 
 #pragma mark - 注入 UTDID
