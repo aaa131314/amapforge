@@ -28,6 +28,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 连通测试（TCP + frida）
 + (NSString *)connectTest;
 
+/// 当前服务器地址
++ (NSString *)serverAddr;
+
+/// 设置服务器地址（持久化）
++ (BOOL)setServerAddr:(NSString *)addr;
+
 /// 生成随机 22 位 ID
 + (NSString *)randomID;
 
