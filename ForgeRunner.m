@@ -1,7 +1,13 @@
 #import "ForgeRunner.h"
 
-// 走电脑：通过 Cloudflare 公网隧道（手机可用 4G）
-static NSString *const kServer = @"https://guide-juan-collector-calls.trycloudflare.com";
+// 服务器地址：优先读 NSUserDefaults，没有就用默认值
+static NSString *const kDefaultServer = @"https://guide-juan-collector-calls.trycloudflare.com";
+
+static NSString *serverURL(void) {
+    NSString *s = [[NSUserDefaults standardUserDefaults] stringForKey:@"amapforge_server"];
+    if (s.length > 8) return s;
+    return kDefaultServer;
+}
 
 static NSURLSession *_sharedSession(void) {
     static NSURLSession *s = nil;
@@ -19,11 +25,27 @@ static NSURLSession *_sharedSession(void) {
 
 @implementation ForgeRunner
 
+
+/// 当前服务器地址
++ (NSString *)serverAddr {
+    return serverURL();
+}
+
+/// 设置服务器地址（持久化）
++ (BOOL)setServerAddr:(NSString *)addr {
+    if (addr.length < 8) return NO;
+    if (![addr hasPrefix:@"http://"] && ![addr hasPrefix:@"https://"]) return NO;
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setObject:addr forKey:@"amapforge_server"];
+    [ud synchronize];
+    return YES;
+}
+
 #pragma mark - HTTP
 
 + (NSDictionary *)postJSON:(NSString *)path body:(NSDictionary *)body timeout:(NSTimeInterval)t {
     @try {
-        NSURL *url = [NSURL URLWithString:[kServer stringByAppendingString:path]];
+        NSURL *url = [NSURL URLWithString:[serverURL() stringByAppendingString:path]];
         if (!url) return @{@"ok": @NO, @"error": @"URL 无效"};
 
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
@@ -60,7 +82,7 @@ static NSURLSession *_sharedSession(void) {
 
 + (NSDictionary *)getJSON:(NSString *)path {
     @try {
-        NSURL *url = [NSURL URLWithString:[kServer stringByAppendingString:path]];
+        NSURL *url = [NSURL URLWithString:[serverURL() stringByAppendingString:path]];
         if (!url) return @{@"ok": @NO};
 
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
@@ -154,7 +176,7 @@ static NSURLSession *_sharedSession(void) {
         NSDictionary *r = [self getJSON:@"/api/forge/status"];
         if (![r[@"ok"] boolValue]) {
             return [NSString stringWithFormat:@"连不上 %@\n%@",
-                    kServer, [self str:r[@"error"] def:@"超时"]];
+                    serverURL(), [self str:r[@"error"] def:@"超时"]];
         }
         return [NSString stringWithFormat:@"服务器 OK\n%@", [self status]];
     } @catch (NSException *e) {
