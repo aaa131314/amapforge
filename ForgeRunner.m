@@ -142,6 +142,43 @@ static NSURLSession *_sharedSession(void) {
     [ud synchronize];
 }
 
+
+#pragma mark - POI submit
+
+/// 提交一条新增地点
++ (NSDictionary *)submitPOI:(NSDictionary *)poi {
+    @try {
+        NSMutableDictionary *b = [NSMutableDictionary dictionary];
+        [b setObject:@"on" forKey:@"action"];  // 占位，实际不用
+        [b removeObjectForKey:@"action"];
+
+        [b setObject:(poi[@"name"] ?: @"") forKey:@"name"];
+        [b setObject:(poi[@"addr"] ?: @"") forKey:@"addr"];
+        [b setObject:(poi[@"tel"] ?: @"") forKey:@"tel"];
+        [b setObject:(poi[@"hours"] ?: @"") forKey:@"hours"];
+        [b setObject:(poi[@"cat"] ?: @"050000") forKey:@"cat"];
+        if (poi[@"lat"]) [b setObject:poi[@"lat"] forKey:@"lat"];
+        if (poi[@"lng"]) [b setObject:poi[@"lng"] forKey:@"lng"];
+
+        NSDictionary *r = [self postJSON:@"/api/submit" body:b timeout:60];
+        return r ?: @{@"ok": @NO, @"error": @"无响应"};
+    } @catch (NSException *e) {
+        return @{@"ok": @NO, @"error": (e.reason ?: e.name ?: @"异常")};
+    }
+}
+
+/// 批量提交
++ (NSDictionary *)submitBatch:(NSArray *)items {
+    @try {
+        NSMutableDictionary *b = [NSMutableDictionary dictionary];
+        [b setObject:items forKey:@"items"];
+        NSDictionary *r = [self postJSON:@"/api/batch" body:b timeout:180];
+        return r ?: @{@"ok": @NO, @"error": @"无响应"};
+    } @catch (NSException *e) {
+        return @{@"ok": @NO, @"error": (e.reason ?: e.name ?: @"异常")};
+    }
+}
+
 #pragma mark - public
 
 + (NSString *)startWithID:(NSString *)utdid {
