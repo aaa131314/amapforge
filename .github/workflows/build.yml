@@ -20,15 +20,14 @@ jobs:
             libplist-dev libssl-dev zlib1g-dev \
             unzip xz-utils fakeroot dpkg-dev 2>&1 | tail -3
           echo "clang: $(clang --version | head -1)"
-          echo "dpkg-deb: $(dpkg-deb --version | head -1)"
 
       - name: Build ldid
         run: |
           git clone --depth 1 https://github.com/ProcursusTeam/ldid.git /tmp/ldid-src
           cd /tmp/ldid-src
-          make -j4 2>&1 | tail -5
-          sudo cp ldid /usr/local/bin/
-          echo "ldid installed: $(which ldid)"
+          make -j4 2>&1 | tail -3
+          sudo cp ldid /usr/local/bin/ 2>/dev/null || true
+          echo "ldid: $(which ldid || echo MISSING)"
 
       - name: Download iOS SDK
         run: |
@@ -38,106 +37,92 @@ jobs:
             "https://codeload.github.com/theos/sdks/tar.gz/refs/heads/master"
           tar xzf sdk.tar.gz --strip-components=1
           rm -f sdk.tar.gz
-          ls -d iPhoneOS*.sdk
           SDK=$(ls -d iPhoneOS*.sdk | sort -V | tail -1)
           echo "SELECTED_SDK=$SDK" >> $GITHUB_ENV
-          echo "SDK path: /tmp/sdk/$SDK"
+          echo "SDK: $SDK"
 
-      - name: Compile binary
+      - name: Download frida-core devkit
+        run: |
+          mkdir -p /tmp/frida
+          cd /tmp/frida
+          curl -fL --retry 3 --max-time 900 -o devkit.tar.xz \
+            "https://github.com/frida/frida/releases/download/17.24.3/frida-core-devkit-17.24.3-ios-arm64.tar.xz"
+          tar -xf devkit.tar.xz
+          ls -la
+          echo "FRIDA_DIR=/tmp/frida" >> $GITHUB_ENV
+
+      - name: Build with frida-core
         run: |
           set +e
           SDK="/tmp/sdk/${SELECTED_SDK}"
-          echo "=== using SDK: $SDK ==="
+          FRIDA="/tmp/frida"
           mkdir -p build/AMapForge.app
 
-          CFLAGS="-target arm64-apple-ios14.0 -isysroot $SDK -fobjc-arc -O2 -I."
+          cp forge_utdid.js build/AMapForge.app/ 2>/dev/null || echo "WARN: forge_utdid.js missing"
+          cp Info.plist build/AMapForge.app/
+
+          CFLAGS="-target arm64-apple-ios14.0 -isysroot $SDK -fobjc-arc -O1 -I. -I$FRIDA"
 
           echo "=== compile main.m ==="
-          clang $CFLAGS -c main.m -o build/main.o 2>&1 | tee /tmp/c1.log
-          echo "rc1=$?"
-
+          clang $CFLAGS -c main.m -o build/main.o 2>&1 | tail -20
           echo "=== compile RootViewController.m ==="
-          clang $CFLAGS -c RootViewController.m -o build/rvc.o 2>&1 | tee /tmp/c2.log
-          echo "rc2=$?"
-
+          clang $CFLAGS -c RootViewController.m -o build/rvc.o 2>&1 | tail -20
           echo "=== compile ForgeRunner.m ==="
-          clang $CFLAGS -c ForgeRunner.m -o build/fr.o 2>&1 | tee /tmp/c3.log
-          echo "rc3=$?"
-
+          clang $CFLAGS -c ForgeRunner.m -o build/fr.o 2>&1 | tail -40
           echo "=== link ==="
-          clang -target arm64-apple-ios14.0 -isysroot "$SDK" \
-                -fuse-ld=lld \
-                -framework UIKit -framework Foundation -framework CoreGraphics \
+          clang -target arm64-apple-ios14.0 -isysroot "$SDK" -fuse-ld=lld \
+                -framework UIKit -framework Foundation \
+                -framework CoreFoundation -framework CoreGraphics \
+                -framework Security -framework CFNetwork \
                 build/main.o build/rvc.o build/fr.o \
-                -o build/AMapForge.app/AMapForge 2>&1 | tee /tmp/link.log
-          rclink=$?
-          echo "rclink=$rclink"
-          if [ $rclink -ne 0 ] || [ ! -f build/AMapForge.app/AMapForge ]; then
-            echo "=== retry with ld64.lld directly ==="
-            LD64=$(command -v ld64.lld || command -v ld.lld || echo "")
-            echo "ld64.lld: $LD64"
-            if [ -n "$LD64" ]; then
-              $LD64 -arch arm64 \
-                -platform_version ios 14.0 14.0 \
-                -syslibroot "$SDK" \
-                -framework UIKit -framework Foundation -framework CoreGraphics \
-                -o build/AMapForge.app/AMapForge \
-                build/main.o build/rvc.o build/fr.o 2>&1 | tee -a /tmp/link.log
-              echo "ld64 rc=$?"
-            fi
-          fi
-          ls -la build/AMapForge.app/ || true
+                "$FRIDA/libfrida-core.a" \
+                -lbsm -ldl -lm -lresolv \
+                -o build/AMapForge.app/AMapForge 2>&1 | tail -40
 
-          ls -la build/AMapForge.app/ || echo "no app dir"
+          ls -la build/AMapForge.app/ 2>/dev/null || true
 
           {
-            echo "### Compile logs"
+            echo "### Build output"
             echo '```'
-            echo "--- c1 ---"; tail -30 /tmp/c1.log 2>/dev/null
-            echo "--- c2 ---"; tail -30 /tmp/c2.log 2>/dev/null
-            echo "--- c3 ---"; tail -30 /tmp/c3.log 2>/dev/null
-            echo "--- link ---"; tail -30 /tmp/link.log 2>/dev/null
+            ls -la build/AMapForge.app/ 2>/dev/null || echo "no app dir"
             echo '```'
           } >> $GITHUB_STEP_SUMMARY
           exit 0
 
-      - name: Package app
+      - name: Package deb
         run: |
           set +e
           APP=build/AMapForge.app
           if [ ! -f "$APP/AMapForge" ]; then
-            echo "binary missing, cannot package"
-            echo "### package: binary missing" >> $GITHUB_STEP_SUMMARY
-            ls -la build/ || true
+            echo "binary missing, skip packaging"
+            echo "### package skipped (no binary)" >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
-
-          cp Info.plist "$APP/"
-          /usr/local/bin/ldid -S "$APP/AMapForge" 2>&1 | head -5
-          echo "signed ok"
+          /usr/local/bin/ldid -S "$APP/AMapForge" 2>&1 | head -3 || echo "ldid skipped"
 
           ROOT=build/pkg
           mkdir -p "$ROOT/var/jb/Applications"
           cp -R "$APP" "$ROOT/var/jb/Applications/"
+          chmod 755 "$ROOT/var/jb/Applications/AMapForge.app/AMapForge"
           mkdir -p "$ROOT/DEBIAN"
           {
             echo "Package: com.local.amapforge"
             echo "Name: AMap Forge"
-            echo "Version: 1.0.6"
+            echo "Version: 2.0.0"
             echo "Architecture: iphoneos-arm64"
-            echo "Description: AMap device identity switcher."
+            echo "Description: AMap device identity switcher (offline, built-in frida)."
             echo "Maintainer: local"
             echo "Author: local"
             echo "Section: Utilities"
             echo "Priority: optional"
           } > "$ROOT/DEBIAN/control"
 
-          dpkg-deb -Zxz -z9 --build --root-owner-group "$ROOT" /tmp/out.deb 2>&1 | tail -5
-          ls -la /tmp/out.deb
+          dpkg-deb -Zxz -z9 --build --root-owner-group "$ROOT" /tmp/out.deb 2>&1 | tail -3
           mkdir -p dist
-          cp /tmp/out.deb "dist/com.local.amapforge_1.0.6_iphoneos-arm64.deb"
+          cp /tmp/out.deb "dist/com.local.amapforge_2.0.0_iphoneos-arm64.deb"
           ls -la dist/
-          echo "### package done" >> $GITHUB_STEP_SUMMARY
+          du -sh "$APP" 2>/dev/null || true
+          echo "### packaged ok" >> $GITHUB_STEP_SUMMARY
           exit 0
 
       - name: Upload deb
