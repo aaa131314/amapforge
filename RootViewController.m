@@ -141,26 +141,35 @@
 - (void)refreshLight {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSDictionary *st = [ForgeRunner statusDict];
-        BOOL running = [st[@"running"] boolValue];
+        BOOL injected = [st[@"running"] boolValue];
+        BOOL reachable = [st[@"ok"] boolValue];
         id idRaw = st[@"utdid"];
         NSString *idv = [idRaw isKindOfClass:[NSString class]] ? idRaw : nil;
-        NSInteger served = [st[@"served"] respondsToSelector:@selector(integerValue)]
-                            ? [st[@"served"] integerValue] : 0;
-        BOOL reachable = [st[@"ok"] boolValue];
+        id procRaw = st[@"proc"];
+        NSString *proc = [procRaw isKindOfClass:[NSString class]] ? procRaw : @"";
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!reachable) {
-                self.statusLabel.text = @"🔴 连不上电脑服务";
+                self.statusLabel.text = @"🔴 frida-server 不可达";
                 self.statusLabel.textColor = [UIColor colorWithRed:0.85 green:0.25 blue:0.25 alpha:1.0];
-                self.idLabel.text = @"检查 8050 服务和隧道";
+                self.idLabel.text = @"检查 frida-server 是否运行";
                 self.countLabel.text = @"";
                 return;
             }
-            self.statusLabel.text = running ? @"🟢 正在伪造设备身份" : @"⚪️ 使用真实设备身份";
-            self.statusLabel.textColor = running
-                ? [UIColor colorWithRed:0.25 green:0.73 blue:0.31 alpha:1.0]
-                : [UIColor colorWithWhite:0.6 alpha:1.0];
-            self.idLabel.text = running ? (idv ?: @"—") : @"（真实 ID，未伪造）";
-            self.countLabel.text = [NSString stringWithFormat:@"已服务 %ld 次读取", (long)served];
+            if (injected) {
+                self.statusLabel.text = @"🟢 已伪装设备身份";
+                self.statusLabel.textColor = [UIColor colorWithRed:0.25 green:0.73 blue:0.31 alpha:1.0];
+                self.idLabel.text = idv ?: @"—";
+                self.countLabel.text = proc.length
+                    ? [NSString stringWithFormat:@"高德运行中 (%@)", proc]
+                    : @"高德未启动";
+            } else {
+                self.statusLabel.text = @"⚪️ 使用真实设备身份";
+                self.statusLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1.0];
+                self.idLabel.text = @"（真实 ID，未伪造）";
+                self.countLabel.text = proc.length
+                    ? [NSString stringWithFormat:@"高德运行中 (%@)", proc]
+                    : @"点「① 换一个新设备身份」开始";
+            }
         });
     });
 }
