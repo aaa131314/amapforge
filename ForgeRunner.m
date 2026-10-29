@@ -116,6 +116,32 @@ static NSURLSession *_sharedSession(void) {
     return [v isKindOfClass:[NSString class]] ? v : d;
 }
 
+
+/// 读取伪装参数
++ (NSDictionary *)spoofConfig {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    return @{
+        @"model": [ud stringForKey:@"amapforge_model"] ?: @"iPhone15,2",
+        @"ios": [ud stringForKey:@"amapforge_ios"] ?: @"17.5.1",
+        @"ios_n": [ud objectForKey:@"amapforge_ios_n"] ?: @170501,
+        @"lat": [ud objectForKey:@"amapforge_lat"] ?: @39.9042,
+        @"lng": [ud objectForKey:@"amapforge_lng"] ?: @116.4074,
+        @"adcode": [ud stringForKey:@"amapforge_adcode"] ?: @"110000"
+    };
+}
+
+/// 保存伪装参数
++ (void)setSpoofConfig:(NSDictionary *)cfg {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    if (cfg[@"model"]) [ud setObject:cfg[@"model"] forKey:@"amapforge_model"];
+    if (cfg[@"ios"]) [ud setObject:cfg[@"ios"] forKey:@"amapforge_ios"];
+    if (cfg[@"ios_n"]) [ud setObject:cfg[@"ios_n"] forKey:@"amapforge_ios_n"];
+    if (cfg[@"lat"]) [ud setObject:cfg[@"lat"] forKey:@"amapforge_lat"];
+    if (cfg[@"lng"]) [ud setObject:cfg[@"lng"] forKey:@"amapforge_lng"];
+    if (cfg[@"adcode"]) [ud setObject:cfg[@"adcode"] forKey:@"amapforge_adcode"];
+    [ud synchronize];
+}
+
 #pragma mark - public
 
 + (NSString *)startWithID:(NSString *)utdid {
@@ -123,6 +149,26 @@ static NSURLSession *_sharedSession(void) {
         NSMutableDictionary *b = [NSMutableDictionary dictionary];
         [b setObject:@"on" forKey:@"action"];
         if (utdid.length > 0) [b setObject:utdid forKey:@"id"];
+
+        // 附上用户配置的伪装参数
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        NSString *model = [ud stringForKey:@"amapforge_model"];
+        if (model.length > 0) [b setObject:model forKey:@"model"];
+
+        NSString *ios = [ud stringForKey:@"amapforge_ios"];
+        if (ios.length > 0) [b setObject:ios forKey:@"ios"];
+
+        NSNumber *iosN = [ud objectForKey:@"amapforge_ios_n"];
+        if (iosN) [b setObject:iosN forKey:@"ios_n"];
+
+        NSNumber *lat = [ud objectForKey:@"amapforge_lat"];
+        if (lat) [b setObject:lat forKey:@"lat"];
+
+        NSNumber *lng = [ud objectForKey:@"amapforge_lng"];
+        if (lng) [b setObject:lng forKey:@"lng"];
+
+        NSString *adcode = [ud stringForKey:@"amapforge_adcode"];
+        if (adcode.length > 0) [b setObject:adcode forKey:@"adcode"];
 
         NSDictionary *r = [self postJSON:@"/api/forge" body:b timeout:90];
         if ([r[@"ok"] boolValue]) {
