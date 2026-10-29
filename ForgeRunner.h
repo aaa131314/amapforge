@@ -10,8 +10,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// 停止注入
 + (NSString *)stop;
 
-/// 查看状态
+/// 查看状态（字符串）
 + (NSString *)status;
+
+/// 一次拿全部状态 {running, utdid, served}
++ (NSDictionary *)statusDict;
 
 /// 清理高德数据（deep=YES 连离线地图一起删）
 + (NSString *)wipeData:(BOOL)deep;
